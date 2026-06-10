@@ -1,32 +1,35 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/ubuntu
 {
-	"name": "Alpha-Forge",
-	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	"build": {
-	  "dockerfile": "Dockerfile"
-	},
+  "name": "Alpha-Forge",
+  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+  "build": {
+    "dockerfile": "Dockerfile",
+  },
 
-	"workspaceMount": "source=alpha-forge-repo,target=/workspaces/alpha-forge,type=volume",
-	"workspaceFolder": "/workspaces/alpha-forge",
+  "workspaceMount": "source=alpha-forge-repo,target=/workspaces/alpha-forge,type=volume",
+  "workspaceFolder": "/workspaces/alpha-forge",
 
-	// Features to add to the dev container. More info: https://containers.dev/features.
-	// "features": {},
+  "mounts": [
+    "source=${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh,type=bind,readonly",
+  ],
+  // Features to add to the dev container. More info: https://containers.dev/features.
+  // "features": {},
 
-	// Use 'forwardPorts' to make a list of ports inside the container available locally.
-	// "forwardPorts": [],
+  // Use 'forwardPorts' to make a list of ports inside the container available locally.
+  // "forwardPorts": [],
 
-	// Use 'postCreateCommand' to run commands after the container is created.
-	// "postCreateCommand": "uname -a",
+  // Use 'postCreateCommand' to run commands after the container is created.
+  // "postCreateCommand": "uname -a",
 
-	// Configure tool-specific properties.
-	// "customizations": {},
+  // Configure tool-specific properties.
+  // "customizations": {},
 
-	"containerEnv": {
-	  "SHELL": "/usr/bin/zsh",
-		"UV_CACHE_DIR": "${containerWorkspaceFolder}/.cache/uv"
-	},
+  "containerEnv": {
+    "SHELL": "/usr/bin/zsh",
+    "UV_CACHE_DIR": "${containerWorkspaceFolder}/.cache/uv",
+  },
 
-	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
-	"remoteUser": "vscode"
+  // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+  "remoteUser": "vscode",
 }
