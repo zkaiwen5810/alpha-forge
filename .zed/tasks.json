@@ -1,0 +1,13 @@
+[
+    {
+        "label": "Run current Python file with uv",
+        "command": "uv",
+        "args": ["run", "python", "$ZED_RELATIVE_FILE"],
+        "cwd": "$ZED_WORKTREE_ROOT",
+        "reveal": "always",
+        "hide": "never",
+        "use_new_terminal": false,
+        "allow_concurrent_runs": true,
+        "save": "current"
+    }
+]
