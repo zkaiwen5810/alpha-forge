@@ -1,57 +1,58 @@
 // For format details, see https://aka.ms/devcontainer.json. For config options, see the
 // README at: https://github.com/devcontainers/templates/tree/main/src/ubuntu
 {
-  "name": "Alpha-Forge",
-  // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-  "build": {
-    "dockerfile": "Dockerfile",
-  },
-
-  "runArgs": [
-    "--env-file",
-    "${localWorkspaceFolder}/.devcontainer/.devcontainer.env",
-  ],
-
-  "workspaceMount": "source=alpha-forge-repo,target=/workspaces/alpha-forge,type=volume",
-  "workspaceFolder": "/workspaces/alpha-forge",
-
-  "mounts": [
-    "source=${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh,type=bind,readonly",
-    "source=${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly",
-
-    "source=codex-home,target=/home/vscode/.codex,type=volume",
-
-    "source=claude-home,target=/home/vscode/.claude,type=volume",
-    "source=claude-config,target=/home/vscode/.config/claude,type=volume",
-    "source=claude-cache,target=/home/vscode/.cache/claude,type=volume",
-
-    "source=claude-code-persist,target=/home/vscode/.persist,type=volume",
-  ],
-  // Features to add to the dev container. More info: https://containers.dev/features.
-  "features": {
-    "ghcr.io/zkaiwen5810/features/ai-coding-cli:latest": {
-      "nodeMajor": "20",
-      "installZsh": true,
-      "installZshrc": true,
+    "name": "Alpha-Forge",
+    // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+    "build": {
+        "dockerfile": "Dockerfile"
     },
-  },
 
-  // Use 'forwardPorts' to make a list of ports inside the container available locally.
-  // "forwardPorts": [],
+    "runArgs": [
+        "--env-file",
+        "${localWorkspaceFolder}/.devcontainer/.devcontainer.env"
+    ],
 
-  // Use 'postCreateCommand' to run commands after the container is created.
-  // "postCreateCommand": "uname -a",
+    "workspaceMount": "source=alpha-forge-repo,target=/workspaces/alpha-forge,type=volume",
+    "workspaceFolder": "/workspaces/alpha-forge",
 
-  // Configure tool-specific properties.
-  // "customizations": {},
+    "mounts": [
+        "source=${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh,type=bind,readonly",
+        "source=${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,readonly",
 
-  "containerEnv": {
-    "SHELL": "/usr/bin/zsh",
-    "UV_CACHE_DIR": "${containerWorkspaceFolder}/.cache/uv",
-  },
+        "source=codex-home,target=/home/vscode/.codex,type=volume",
 
-  // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
-  "remoteUser": "vscode",
+        "source=claude-home,target=/home/vscode/.claude,type=volume",
+        "source=claude-config,target=/home/vscode/.config/claude,type=volume",
+        "source=claude-cache,target=/home/vscode/.cache/claude,type=volume",
 
-  "postCreateCommand": "bash .devcontainer/post-create.sh",
+        "source=claude-code-persist,target=/home/vscode/.persist,type=volume"
+    ],
+    // Features to add to the dev container. More info: https://containers.dev/features.
+    "features": {
+        "ghcr.io/zkaiwen5810/features/ai-coding-cli:latest": {
+            "nodeMajor": "20",
+            "installZsh": true,
+            "installZshrc": true
+        }
+    },
+
+    // Use 'forwardPorts' to make a list of ports inside the container available locally.
+    // "forwardPorts": [],
+
+    // Use 'postCreateCommand' to run commands after the container is created.
+    // "postCreateCommand": "uname -a",
+
+    // Configure tool-specific properties.
+    // "customizations": {},
+
+    "containerEnv": {
+        "SHELL": "/usr/bin/zsh",
+        "UV_CACHE_DIR": "${containerWorkspaceFolder}/.cache/uv",
+        "UV_ENV_FILE": "${containerWorkspaceFolder}/.env.local"
+    },
+
+    // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+    "remoteUser": "vscode",
+
+    "postCreateCommand": "bash .devcontainer/post-create.sh"
 }
