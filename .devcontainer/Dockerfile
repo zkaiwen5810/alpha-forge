@@ -7,8 +7,10 @@ RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|https://mirrors.tuna.tsinghua.ed
 # Install basic development tools and iptables/ipset
 RUN apt-get update && apt-get install -y --no-install-recommends \
   build-essential \
+  ca-certificates \
   curl \
   git \
+  gnupg \
   sudo \
   zsh \
   jq \
@@ -17,7 +19,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   python3-pip \
   python3-venv \
   bubblewrap \
+  && chmod 4755 /usr/bin/bwrap \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 20 during image build so downstream feature setup can reuse
+# Docker's layer cache instead of reinstalling Node on each container rebuild.
+RUN mkdir -p /etc/apt/keyrings \
+  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+    | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+  && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+    > /etc/apt/sources.list.d/nodesource.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends nodejs \
+  && corepack enable \
+  && node --version \
+  && npm --version \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/*
 
 # npm/pnpm/yarn/corepack
 ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com/
