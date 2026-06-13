@@ -1,10 +1,25 @@
-from openai import OpenAI
+import sys
+from pathlib import Path
 
-client = OpenAI()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-response = client.responses.create(
-    model="Qwen3.5-4B",
-    input="Write a one-sentence bedtime story about a unicorn.",
-)
+from common import create_client, get_model, load_local_env, print_response
 
-print(response.output_text)
+
+def main() -> None:
+    env_path = load_local_env()
+    if env_path:
+        print(f"Loaded environment variables from {env_path}")
+
+    client = create_client()
+    model = get_model()
+    response = client.responses.create(
+        model=model,
+        input="Write a one-sentence bedtime story about a unicorn.",
+    )
+
+    print_response(response)
+
+
+if __name__ == "__main__":
+    main()
