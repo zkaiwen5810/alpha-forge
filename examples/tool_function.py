@@ -3,7 +3,8 @@ from common import create_client, get_model, load_local_env, print_response
 
 def main() -> None:
     env_path = load_local_env()
-    print(f"Loaded environment variables from {env_path}")
+    if env_path:
+        print(f"Loaded environment variables from {env_path}")
 
     client = create_client()
     model = get_model()
@@ -37,6 +38,7 @@ def main() -> None:
         ],
         model=model,
         tools=tools,
+        n=2,
     )
 
     print_response(response)

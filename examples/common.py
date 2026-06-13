@@ -7,10 +7,10 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 
-def load_local_env() -> Path:
+def load_local_env() -> Path | None:
     uv_env_file = os.environ.get("UV_ENV_FILE")
     if not uv_env_file:
-        raise RuntimeError("UV_ENV_FILE must point to the env file used for local secrets.")
+        return None
 
     env_path = Path(uv_env_file).expanduser()
     if not env_path.is_absolute():
@@ -27,7 +27,8 @@ def create_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "Set OPENAI_API_KEY in the env file referenced by UV_ENV_FILE."
+            "Set OPENAI_API_KEY in the process environment or the env file "
+            "referenced by UV_ENV_FILE."
         )
 
     base_url = os.getenv("OPENAI_BASE_URL")

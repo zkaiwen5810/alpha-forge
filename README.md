@@ -10,11 +10,11 @@ Project constraint:
 
 ## Local secrets
 
-Store local API keys and other secrets in `.env.local`.
+Store devcontainer API keys and other startup secrets in `.devcontainer/.devcontainer.env`. That file is host-side only and is injected into the app and LiteLLM containers by Docker Compose.
 
-1. Copy `.env.example` to `.env.local`
+1. Copy `.env.example` to `.devcontainer/.devcontainer.env`
 2. Replace placeholder values with your real local secrets
-3. Export `UV_ENV_FILE=.env.local`
+3. Restart or reopen the devcontainer after changing `.devcontainer/.devcontainer.env`
 4. Open an example script in Zed
 5. Run it with a Zed task or from the built-in terminal
 
@@ -24,6 +24,8 @@ Example:
 OPENAI_API_KEY=your-real-key
 OPENAI_MODEL=gpt-4.1-mini
 GITHUB_TOKEN=your-real-token
+LITELLM_MASTER_KEY=sk-your-local-litellm-master-key
+LITELLM_SALT_KEY=your-local-litellm-salt-key
 ```
 
 Read values in Python with `os.getenv("OPENAI_API_KEY")`.
@@ -36,7 +38,27 @@ OPENAI_BASE_URL=https://your-openai-compatible-provider.example/v1
 
 Leave `OPENAI_BASE_URL` unset for the normal OpenAI API path. Only set it when you intentionally want to target an OpenAI-compatible non-default provider.
 
-The example scripts load environment variables from the file path stored in `UV_ENV_FILE`. In the devcontainer, [.devcontainer/devcontainer.json](/workspaces/alpha-forge/.devcontainer/devcontainer.json) already sets `UV_ENV_FILE` to `${containerWorkspaceFolder}/.env.local`.
+In the devcontainer, environment variables come from the host-side `.devcontainer/.devcontainer.env` file. Because the workspace is mounted as a Docker volume, do not use a repo-root `.env.local` as the devcontainer source of truth.
+
+Env file changes are runtime configuration. Restart or reopen the devcontainer to make new values effective; rebuilding the image is not required unless Dockerfile or image inputs changed.
+
+## LiteLLM proxy
+
+The devcontainer starts a LiteLLM proxy next to the main app container with Docker Compose. The proxy is available at `http://localhost:4000` from the host.
+
+To route app code through LiteLLM from inside the devcontainer, set this in `.devcontainer/.devcontainer.env`:
+
+```env
+OPENAI_BASE_URL=http://litellm:4000/v1
+```
+
+To route host-side tools through LiteLLM, use:
+
+```env
+OPENAI_BASE_URL=http://localhost:4000/v1
+```
+
+Leave `OPENAI_BASE_URL` unset for the normal OpenAI API path.
 
 Install the project environment first:
 
@@ -51,11 +73,8 @@ Zed's Python REPL cell execution is currently not supported in devcontainers usi
 Current shell session:
 
 ```sh
-export UV_ENV_FILE=.env.local
 zed .
 ```
-
-If you want that to be automatic every time you enter the repo, use a shell tool like `direnv` to export `UV_ENV_FILE=.env.local` for this directory.
 
 Run the examples from Zed:
 
@@ -66,8 +85,8 @@ Run the examples from Zed:
 You can also run the examples directly from a terminal:
 
 ```sh
-UV_ENV_FILE=.env.local uv run python examples/chat.py
-UV_ENV_FILE=.env.local uv run python examples/tool_function.py
+uv run python examples/chat.py
+uv run python examples/tool_function.py
 ```
 
 Available examples:
@@ -81,4 +100,4 @@ These examples are OpenAI-first:
 - They default to `OPENAI_MODEL=gpt-4.1-mini`.
 - They only use `OPENAI_BASE_URL` if you explicitly set it.
 
-`.env.local` is git-ignored. Keep real secrets out of committed files and use your deployment platform's secret manager in non-local environments.
+`.devcontainer/.devcontainer.env` is git-ignored. Keep real secrets out of committed files and use your deployment platform's secret manager in non-local environments.

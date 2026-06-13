@@ -2,17 +2,13 @@
 // README at: https://github.com/devcontainers/templates/tree/main/src/ubuntu
 {
     "name": "Alpha-Forge",
-    // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-    "build": {
-        "dockerfile": "Dockerfile"
-    },
-
-    "runArgs": [
-        "--env-file",
-        "${localWorkspaceFolder}/.devcontainer/.devcontainer.env"
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "app",
+    "runServices": [
+        "app",
+        "litellm",
+        "litellm-db"
     ],
-
-    "workspaceMount": "source=alpha-forge-repo,target=/workspaces/alpha-forge,type=volume",
     "workspaceFolder": "/workspaces/alpha-forge",
 
     "mounts": [
@@ -44,12 +40,6 @@
 
     // Configure tool-specific properties.
     // "customizations": {},
-
-    "containerEnv": {
-        "SHELL": "/usr/bin/zsh",
-        "UV_CACHE_DIR": "${containerWorkspaceFolder}/.cache/uv",
-        "UV_ENV_FILE": "${containerWorkspaceFolder}/.env.local"
-    },
 
     // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
     "remoteUser": "vscode",
