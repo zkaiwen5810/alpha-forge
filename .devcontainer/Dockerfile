@@ -50,3 +50,9 @@ ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 # install uv
 # RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN pip3 install --no-cache-dir uv --break-system-packages
+
+# Copy devcontainer bootstrap script into image.
+COPY post-create.sh /tmp/post-create.sh
+
+RUN sed -i 's/\r$//' /tmp/post-create.sh \
+  && chmod +x /tmp/post-create.sh
