@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile
     command: sleep infinity
     env_file:
-      - path: .devcontainer.env
+      - path: app.env
         required: false
     environment:
       SHELL: /usr/bin/zsh
@@ -21,7 +21,7 @@ services:
       - --port=4000
       - --num_workers=8
     env_file:
-      - path: .devcontainer.env
+      - path: litellm.env
         required: false
     environment:
       DATABASE_URL: postgresql://llmproxy:dbpassword9090@litellm-db:5432/litellm

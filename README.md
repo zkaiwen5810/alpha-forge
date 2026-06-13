@@ -10,20 +10,28 @@ Project constraint:
 
 ## Local secrets
 
-Store devcontainer API keys and other startup secrets in `.devcontainer/.devcontainer.env`. That file is host-side only and is injected into the app and LiteLLM containers by Docker Compose.
+Store devcontainer startup secrets in service-specific host-side env files under `.devcontainer/`. Docker Compose injects each file only into its matching service.
 
-1. Copy `.env.example` to `.devcontainer/.devcontainer.env`
-2. Replace placeholder values with your real local secrets
-3. Restart or reopen the devcontainer after changing `.devcontainer/.devcontainer.env`
-4. Open an example script in Zed
-5. Run it with a Zed task or from the built-in terminal
+1. Copy `.devcontainer/app.env.example` to `.devcontainer/app.env`
+2. Copy `.devcontainer/litellm.env.example` to `.devcontainer/litellm.env`
+3. Replace placeholder values with your real local secrets
+4. Recreate the devcontainer after changing either env file
+5. Open an example script in Zed
+6. Run it with a Zed task or from the built-in terminal
 
-Example:
+`app.env` example:
 
 ```env
-OPENAI_API_KEY=your-real-key
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_API_KEY=sk-your-local-litellm-master-key
 GITHUB_TOKEN=your-real-token
+OPENAI_MODEL=gpt-4.1-mini
+OPENAI_BASE_URL=http://litellm:4000/v1
+```
+
+`litellm.env` example:
+
+```env
+OPENAI_API_KEY=your-real-openai-key
 LITELLM_MASTER_KEY=sk-your-local-litellm-master-key
 LITELLM_SALT_KEY=your-local-litellm-salt-key
 ```
@@ -32,13 +40,11 @@ Read values in Python with `os.getenv("OPENAI_API_KEY")`.
 
 Optional override:
 
-```env
-OPENAI_BASE_URL=https://your-openai-compatible-provider.example/v1
-```
+Set `OPENAI_BASE_URL` in `.devcontainer/litellm.env` only when you intentionally want LiteLLM itself to call a non-default OpenAI-compatible provider.
 
 Leave `OPENAI_BASE_URL` unset for the normal OpenAI API path. Only set it when you intentionally want to target an OpenAI-compatible non-default provider.
 
-In the devcontainer, environment variables come from the host-side `.devcontainer/.devcontainer.env` file. Because the workspace is mounted as a Docker volume, do not use a repo-root `.env.local` as the devcontainer source of truth.
+In the devcontainer, environment variables come from the host-side `.devcontainer/app.env` and `.devcontainer/litellm.env` files. Because the workspace is mounted as a Docker volume, do not use a repo-root `.env.local` as the devcontainer source of truth.
 
 Env file changes are runtime configuration. Restart or reopen the devcontainer to make new values effective; rebuilding the image is not required unless Dockerfile or image inputs changed.
 
@@ -46,7 +52,7 @@ Env file changes are runtime configuration. Restart or reopen the devcontainer t
 
 The devcontainer starts a LiteLLM proxy next to the main app container with Docker Compose. The proxy is available at `http://localhost:4000` from the host.
 
-To route app code through LiteLLM from inside the devcontainer, set this in `.devcontainer/.devcontainer.env`:
+To route app code through LiteLLM from inside the devcontainer, set this in `.devcontainer/app.env`:
 
 ```env
 OPENAI_BASE_URL=http://litellm:4000/v1
@@ -100,4 +106,4 @@ These examples are OpenAI-first:
 - They default to `OPENAI_MODEL=gpt-4.1-mini`.
 - They only use `OPENAI_BASE_URL` if you explicitly set it.
 
-`.devcontainer/.devcontainer.env` is git-ignored. Keep real secrets out of committed files and use your deployment platform's secret manager in non-local environments.
+`.devcontainer/app.env` and `.devcontainer/litellm.env` should stay git-ignored. Keep real secrets out of committed files and use your deployment platform's secret manager in non-local environments.
