@@ -23,7 +23,6 @@ Store devcontainer startup secrets in service-specific host-side env files under
 
 ```env
 OPENAI_API_KEY=sk-your-local-litellm-master-key
-GITHUB_TOKEN=your-real-token
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_BASE_URL=http://litellm:4000/v1
 ```
@@ -45,6 +44,8 @@ Set `OPENAI_BASE_URL` in `.devcontainer/litellm.env` only when you intentionally
 Leave `OPENAI_BASE_URL` unset for the normal OpenAI API path. Only set it when you intentionally want to target an OpenAI-compatible non-default provider.
 
 In the devcontainer, environment variables come from the host-side `.devcontainer/app.env` and `.devcontainer/litellm.env` files. Because the workspace is mounted as a Docker volume, do not use a repo-root `.env.local` as the devcontainer source of truth.
+
+Avoid setting a placeholder `GITHUB_TOKEN` in `.devcontainer/app.env`. Zed may pass that variable through when downloading language server binaries such as Ruff, and an invalid token causes GitHub API `401 Bad credentials` failures.
 
 Env file changes are runtime configuration. Restart or reopen the devcontainer to make new values effective; rebuilding the image is not required unless Dockerfile or image inputs changed.
 
