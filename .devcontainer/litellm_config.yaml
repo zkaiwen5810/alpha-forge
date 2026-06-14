@@ -1,20 +1,25 @@
 model_list:
-  - model_name: Qwen3.5-4B
-    litellm_params:
-      model: openai/Qwen/Qwen3.5-4B
-      api_base: os.environ/OPENAI_BASE_URL
-      api_key: os.environ/OPENAI_API_KEY
-      use_chat_completions_api: true
-  - model_name: DeepSeek-V4-Flash
-    litellm_params:
-      model: openai/deepseek-ai/DeepSeek-V4-Flash
-      api_base: os.environ/OPENAI_BASE_URL
-      api_key: os.environ/OPENAI_API_KEY
-      use_chat_completions_api: true
+    - model_name: Qwen3.5-4B
+      litellm_params:
+          model: openai/Qwen/Qwen3.5-4B
+          api_base: os.environ/OPENAI_BASE_URL
+          api_key: os.environ/OPENAI_API_KEY
+          use_chat_completions_api: true
+    - model_name: Qwen3.5-9B
+      litellm_params:
+          model: openai/Qwen/Qwen3.5-9B
+          api_base: os.environ/OPENAI_BASE_URL
+          api_key: os.environ/OPENAI_API_KEY
+          use_chat_completions_api: true
+    - model_name: DeepSeek-V4-Flash
+      litellm_params:
+          model: openai/chat_completions/deepseek-ai/DeepSeek-V4-Flash
+          api_base: os.environ/OPENAI_BASE_URL
+          api_key: os.environ/OPENAI_API_KEY
 
 general_settings:
-  master_key: os.environ/LITELLM_MASTER_KEY
-  database_url: postgresql://llmproxy:dbpassword9090@litellm-db:5432/litellm
+    master_key: os.environ/LITELLM_MASTER_KEY
+    database_url: postgresql://llmproxy:dbpassword9090@litellm-db:5432/litellm
 
 litellm_settings:
-  set_verbose: false
+    set_verbose: false
