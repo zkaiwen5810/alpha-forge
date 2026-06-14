@@ -5,6 +5,12 @@ model_list:
       api_base: os.environ/OPENAI_BASE_URL
       api_key: os.environ/OPENAI_API_KEY
       use_chat_completions_api: true
+  - model_name: DeepSeek-V4-Flash
+    litellm_params:
+      model: openai/deepseek-ai/DeepSeek-V4-Flash
+      api_base: os.environ/OPENAI_BASE_URL
+      api_key: os.environ/OPENAI_API_KEY
+      use_chat_completions_api: true
 
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
