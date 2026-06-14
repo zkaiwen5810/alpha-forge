@@ -1,9 +1,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from common import create_client, get_model, load_local_env, print_response
+from examples.common import create_client, get_model, load_local_env, print_response
 
 
 def main() -> None:

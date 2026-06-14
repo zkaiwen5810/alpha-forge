@@ -1,4 +1,4 @@
-from common import create_client, get_model, load_local_env, print_response
+from ..common import create_client, get_model, load_local_env, print_response
 
 
 def main() -> None:
