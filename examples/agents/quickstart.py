@@ -47,28 +47,28 @@ history_tutor = Agent(
     name="history_tutor",
     handoff_description="Specialist for history questions.",
     instructions="Answer history questions clearly and concisely.",
-    model="Qwen3.6-35B-A3B",
+    model="DeepSeek-V4-Flash",
 )
 
 math_tutor = Agent(
     name="math_tutor",
     handoff_description="Specialist for math questions.",
     instructions="Explain math step by step and include worked examples.",
-    model="Qwen3.6-35B-A3B",
+    model="DeepSeek-V4-Flash",
 )
 
 triage_agent = Agent(
     name="homework_triage",
     instructions="Route each homework question to the right specialist.",
     handoffs=[history_tutor, math_tutor],
-    model="Qwen3.6-35B-A3B",
+    model="DeepSeek-V4-Flash",
 )
 
 
 async def main() -> None:
     # LiteLLM's OpenAI-compatible Responses support is incomplete for this handoff flow.
     # Force Chat Completions so the example works against a LiteLLM gateway.
-    set_default_openai_api("chat_completions")
+    # set_default_openai_api("chat_completions")
 
     result = await Runner.run(
         triage_agent,
