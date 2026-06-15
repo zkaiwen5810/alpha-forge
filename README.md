@@ -8,6 +8,30 @@ Project constraint:
 - Do not introduce SiliconFlow-specific API keys, base URLs, model names, or config as defaults.
 - Use provider-specific settings only when they are strictly necessary, and keep them opt-in behind generic OpenAI-compatible overrides such as `OPENAI_BASE_URL`.
 
+## Architecture
+
+The application is built around the OpenAI SDK and the OpenAI API shape.
+
+Default path:
+
+- App code uses the OpenAI SDK directly.
+- `OPENAI_API_KEY` is required.
+- `OPENAI_MODEL` defaults to an OpenAI model such as `gpt-4.1-mini`.
+- `OPENAI_BASE_URL` stays unset, so requests go to OpenAI directly.
+
+Gateway path:
+
+- The devcontainer also runs a local LiteLLM gateway.
+- App code can point the same OpenAI SDK client at LiteLLM by setting `OPENAI_BASE_URL`.
+- LiteLLM acts as an OpenAI-compatible gateway in front of the upstream provider.
+- This keeps application code OpenAI-shaped even when traffic is routed through a proxy.
+
+Design intent:
+
+- OpenAI remains the primary and documented provider path.
+- LiteLLM is part of the local and deployment architecture when a gateway is useful.
+- Non-OpenAI providers must remain opt-in and should be introduced through generic OpenAI-compatible settings, not provider-specific defaults in app code.
+
 ## Local secrets
 
 Store devcontainer startup secrets in service-specific host-side env files under `.devcontainer/`. Docker Compose injects each file only into its matching service.
@@ -52,6 +76,13 @@ Env file changes are runtime configuration. Restart or reopen the devcontainer t
 ## LiteLLM proxy
 
 The devcontainer starts a LiteLLM proxy next to the main app container with Docker Compose. The proxy is available at `http://localhost:4000` from the host.
+
+When enabled, LiteLLM is a gateway layer in the architecture:
+
+- Inside the app, code still uses the OpenAI SDK.
+- The gateway is selected by setting `OPENAI_BASE_URL`.
+- LiteLLM then forwards requests either to OpenAI or to another OpenAI-compatible upstream configured on the gateway side.
+- Some OpenAI features may require extra LiteLLM configuration to behave the same way through the gateway.
 
 To route app code through LiteLLM from inside the devcontainer, set this in `.devcontainer/app.env`:
 
