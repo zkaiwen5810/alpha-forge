@@ -4,7 +4,7 @@
   "name": "Alpha-Forge",
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
-  "runServices": ["app", "litellm", "litellm-db", "minio"],
+  "runServices": ["app", "litellm", "litellm-db"],
   "workspaceFolder": "/workspaces/alpha-forge",
 
   "mounts": [
