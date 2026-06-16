@@ -23,6 +23,8 @@ services:
     env_file:
       - path: litellm.env
         required: false
+      - path: minio.env
+        required: false
     environment:
       DATABASE_URL: postgresql://llmproxy:dbpassword9090@litellm-db:5432/litellm
       STORE_MODEL_IN_DB: "True"
@@ -33,6 +35,10 @@ services:
     depends_on:
       litellm-db:
         condition: service_healthy
+      minio:
+        condition: service_started
+      minio-init:
+        condition: service_completed_successfully
 
   litellm-db:
     image: postgres:16
@@ -49,6 +55,35 @@ services:
     volumes:
       - litellm-db-data:/var/lib/postgresql/data
 
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    env_file:
+      - path: minio.env
+        required: false
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: quay.io/minio/mc:latest
+    env_file:
+      - path: minio.env
+        required: false
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint:
+      - /bin/sh
+      - -c
+    command: >
+      until mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do sleep 1; done;
+      mc mb --ignore-existing local/"$MINIO_BUCKET_NAME";
+
 volumes:
   alpha-forge-repo:
   litellm-db-data:
+  minio-data:

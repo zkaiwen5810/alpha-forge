@@ -15,6 +15,17 @@ model_list:
 general_settings:
     master_key: os.environ/LITELLM_MASTER_KEY
     database_url: postgresql://llmproxy:dbpassword9090@litellm-db:5432/litellm
+    store_prompts_in_cold_storage: true
 
 litellm_settings:
+    callbacks: ["s3_v2"]
+    cold_storage_custom_logger: s3_v2
+    s3_callback_params:
+        s3_bucket_name: os.environ/MINIO_BUCKET_NAME
+        s3_region_name: os.environ/MINIO_REGION
+        s3_aws_access_key_id: os.environ/MINIO_ROOT_USER
+        s3_aws_secret_access_key: os.environ/MINIO_ROOT_PASSWORD
+        s3_endpoint_url: http://minio:9000
+        s3_use_virtual_hosted_style: false
+        s3_path: litellm-responses
     set_verbose: false
