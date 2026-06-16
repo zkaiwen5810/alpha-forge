@@ -30,6 +30,7 @@ client = OpenAI()
 response = client.responses.create(
     model="Qwen3.6-35B-A3B",
     input="tell me a joke",
+    store=True,
 )
 print(response.output_text)
 print("response.id: ", response.id)

@@ -34,11 +34,11 @@ Design intent:
 
 ## Local secrets
 
-Store devcontainer startup secrets in host-side env files under `.devcontainer/`. Docker Compose injects each file into the service that needs it. `minio.env` is shared with both MinIO and LiteLLM so LiteLLM can authenticate to the local cold-storage backend.
+Store devcontainer startup secrets in host-side env files under `.devcontainer/`. Docker Compose injects each file into the service that needs it.
 
 1. Copy `.devcontainer/app.env.example` to `.devcontainer/app.env`
 2. Copy `.devcontainer/litellm.env.example` to `.devcontainer/litellm.env`
-3. Copy `.devcontainer/minio.env.example` to `.devcontainer/minio.env`
+3. Copy `.devcontainer/cf-r2.env.example` to `.devcontainer/cf-r2.env`
 4. Replace placeholder values with your real local secrets
 5. Recreate the devcontainer after changing any env file
 6. Open an example script in Zed
@@ -60,13 +60,14 @@ LITELLM_MASTER_KEY=sk-your-local-litellm-master-key
 LITELLM_SALT_KEY=your-local-litellm-salt-key
 ```
 
-`minio.env` example:
+`cf-r2.env` example:
 
 ```env
-MINIO_ROOT_USER=your-minio-root-user
-MINIO_ROOT_PASSWORD=your-minio-root-password
-MINIO_BUCKET_NAME=litellm-logs
-MINIO_REGION=us-east-1
+CF_R2_ACCESS_KEY_ID=your-cf-r2-access-key-id
+CF_R2_SECRET_ACCESS_KEY=your-cf-r2-secret-access-key
+CF_R2_BUCKET_NAME=litellm-logs
+CF_R2_REGION=us-east-1
+CF_R2_ENDPOINT_URL=your-cf-r2-endpoint-url
 ```
 
 Read values in Python with `os.getenv("OPENAI_API_KEY")`.
@@ -77,7 +78,7 @@ Set `OPENAI_BASE_URL` in `.devcontainer/litellm.env` only when you intentionally
 
 Leave `OPENAI_BASE_URL` unset for the normal OpenAI API path. Only set it when you intentionally want to target an OpenAI-compatible non-default provider.
 
-In the devcontainer, environment variables come from the host-side `.devcontainer/app.env`, `.devcontainer/litellm.env`, and `.devcontainer/minio.env` files. Because the workspace is mounted as a Docker volume, do not use a repo-root `.env.local` as the devcontainer source of truth.
+In the devcontainer, environment variables come from the host-side `.devcontainer/app.env`, `.devcontainer/litellm.env`, and `.devcontainer/cf-r2.env` files. Because the workspace is mounted as a Docker volume, do not use a repo-root `.env.local` as the devcontainer source of truth.
 
 Avoid setting a placeholder `GITHUB_TOKEN` in `.devcontainer/app.env`. Zed may pass that variable through when downloading language server binaries such as Ruff, and an invalid token causes GitHub API `401 Bad credentials` failures.
 
@@ -93,15 +94,13 @@ When enabled, LiteLLM is a gateway layer in the architecture:
 - The gateway is selected by setting `OPENAI_BASE_URL`.
 - LiteLLM then forwards requests either to OpenAI or to another OpenAI-compatible upstream configured on the gateway side.
 - Some OpenAI features may require extra LiteLLM configuration to behave the same way through the gateway.
-- Responses API session continuity is backed by the local MinIO service through LiteLLM cold storage.
+- Responses API session continuity is backed by Cloudflare R2 through LiteLLM cold storage.
 
 Local infrastructure for the gateway:
 
 - LiteLLM API: `http://localhost:4000`
-- MinIO S3 API: `http://localhost:9000`
-- MinIO console: `http://localhost:9001`
 
-MinIO is used as a self-hosted S3-compatible cold-storage backend. On startup, the devcontainer creates the configured bucket automatically so LiteLLM can persist prompt and response content for `previous_response_id` session continuity.
+Cloudflare R2 is used as the S3-compatible cold-storage backend. LiteLLM persists prompt and response content there so `previous_response_id` can restore prior conversation state.
 
 To route app code through LiteLLM from inside the devcontainer, set this in `.devcontainer/app.env`:
 
@@ -157,4 +156,4 @@ These examples are OpenAI-first:
 - They default to `OPENAI_MODEL=gpt-4.1-mini`.
 - They only use `OPENAI_BASE_URL` if you explicitly set it.
 
-`.devcontainer/app.env`, `.devcontainer/litellm.env`, and `.devcontainer/minio.env` should stay git-ignored. Keep real secrets out of committed files and use your deployment platform's secret manager in non-local environments.
+`.devcontainer/app.env`, `.devcontainer/litellm.env`, and `.devcontainer/cf-r2.env` should stay git-ignored. Keep real secrets out of committed files and use your deployment platform's secret manager in non-local environments.
