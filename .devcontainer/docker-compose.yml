@@ -28,6 +28,9 @@ services:
     environment:
       DATABASE_URL: postgresql://llmproxy:dbpassword9090@litellm-db:5432/litellm
       STORE_MODEL_IN_DB: "True"
+      PROXY_BATCH_WRITE_AT: ${PROXY_BATCH_WRITE_AT:-1}
+      SPEND_LOG_QUEUE_POLL_INTERVAL: ${SPEND_LOG_QUEUE_POLL_INTERVAL:-0.25}
+      SPEND_LOG_QUEUE_SIZE_THRESHOLD: ${SPEND_LOG_QUEUE_SIZE_THRESHOLD:-1}
     ports:
       - "4000:4000"
     volumes:
