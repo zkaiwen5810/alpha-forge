@@ -41,7 +41,7 @@ print(response.output_text)
 
 # LiteLLM writes spend logs asynchronously. The session handler rehydrates
 # from those logs, so an immediate follow-up can race the DB write.
-sleep(10)
+sleep(5)
 
 second_response = client.responses.create(
     model="Qwen3.6-35B-A3B",
