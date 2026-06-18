@@ -17,6 +17,19 @@ class FakeCompletions:
         return SimpleNamespace(choices=[choice])
 
 
+class FakeModels:
+    def __init__(self) -> None:
+        self.response = SimpleNamespace(
+            data=[
+                SimpleNamespace(id="model-b"),
+                SimpleNamespace(id="model-a"),
+            ]
+        )
+
+    def list(self):
+        return self.response
+
+
 class ChatClientTests(unittest.TestCase):
     def test_sends_chat_completions_request_with_explicit_history(self) -> None:
         completions = FakeCompletions()
@@ -39,3 +52,13 @@ class ChatClientTests(unittest.TestCase):
         )
         self.assertNotIn("tools", completions.request)
         self.assertNotIn("previous_response_id", completions.request)
+
+    def test_list_models_returns_sorted_ids(self) -> None:
+        openai_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=FakeCompletions()),
+            models=FakeModels(),
+        )
+        config = Config(api_key="sk-test", model="model-a")
+        client = ChatClient(config, client=openai_client)
+
+        self.assertEqual(client.list_models(), ["model-a", "model-b"])

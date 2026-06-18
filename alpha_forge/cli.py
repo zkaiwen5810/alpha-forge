@@ -6,12 +6,13 @@ import argparse
 
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import InMemoryHistory
 
 from alpha_forge.chat import ChatClient
 from alpha_forge.config import Config, ConfigError
 from alpha_forge.conversation import Conversation
+from alpha_forge.slash_commands import SLASH_COMMANDS, SlashCommandCompleter, SlashCommandHandler
+from alpha_forge.slash_commands.base import CommandContext
 
 
 DEFAULT_SYSTEM_PROMPT = "You are Alpha Forge, a concise and helpful assistant."
@@ -21,17 +22,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="alpha-forge")
     parser.add_argument("--model", help="Override OPENAI_MODEL for this run")
     parser.add_argument("--base-url", help="Override OPENAI_BASE_URL for this run")
-    parser.add_argument("--system", default=DEFAULT_SYSTEM_PROMPT, help="System prompt")
     return parser
 
 
 def run_repl(config: Config, *, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> int:
     conversation = Conversation(system_prompt=system_prompt)
     chat = ChatClient(config)
+    command_handler = SlashCommandHandler()
     session = PromptSession(
         history=InMemoryHistory(),
         auto_suggest=AutoSuggestFromHistory(),
-        completer=WordCompleter(["/clear", "/exit", "/help", "/model", "/quit"], ignore_case=True),
+        completer=SlashCommandCompleter(command.name for command in SLASH_COMMANDS),
         multiline=False,
     )
 
@@ -46,17 +47,22 @@ def run_repl(config: Config, *, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> i
         text = user_input.strip()
         if not text:
             continue
-        if text in {"/exit", "/quit"}:
-            return 0
-        if text == "/help":
-            print_formatted_text("/help /model /clear /exit")
-            continue
-        if text == "/model":
-            print_formatted_text(config.model)
-            continue
-        if text == "/clear":
-            conversation.clear()
-            print_formatted_text("conversation cleared")
+
+        if text.startswith("/"):
+            command_result = command_handler.handle(
+                text,
+                CommandContext(
+                    config=config,
+                    conversation=conversation,
+                    chat=chat,
+                    print_text=print_formatted_text,
+                ),
+            )
+            if command_result.exit_requested:
+                return 0
+            if command_result.handled:
+                continue
+            print_formatted_text(f"unknown command: {text.split(maxsplit=1)[0]}")
             continue
 
         conversation.add_user(user_input)
@@ -86,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
             base_url=args.base_url or config.base_url,
         )
 
-    return run_repl(config, system_prompt=args.system)
+    return run_repl(config)
 
 
 if __name__ == "__main__":

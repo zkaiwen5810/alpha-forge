@@ -26,3 +26,7 @@ class ChatClient:
             messages=[message.to_openai() for message in messages],
         )
         return response.choices[0].message.content or ""
+
+    def list_models(self) -> list[str]:
+        response = self.client.models.list()
+        return sorted(model.id for model in response.data)
