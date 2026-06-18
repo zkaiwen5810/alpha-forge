@@ -7,7 +7,16 @@ requires-python = ">=3.14"
 dependencies = [
     "ipykernel>=6.30.1",
     "openai>=2.41.1",
-    "openai-agents>=0.17.5",
     "prompt-toolkit>=3.0.52",
     "python-dotenv>=1.1.1",
 ]
+
+[project.scripts]
+alpha-forge = "alpha_forge.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["alpha_forge"]

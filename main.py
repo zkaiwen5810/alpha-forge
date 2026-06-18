@@ -1,6 +1,5 @@
-def main():
-    print("Hello from alpha-forge!")
+from alpha_forge.cli import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
