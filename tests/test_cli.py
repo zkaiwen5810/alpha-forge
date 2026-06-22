@@ -52,12 +52,66 @@ class CliTests(unittest.TestCase):
             def prompt(self, _message: str) -> str:
                 return "/exit"
 
+            async def prompt_async(self, _message: str) -> str:
+                return self.prompt(_message)
+
         with patch("alpha_forge.cli.PromptSession", FakeSession):
             with patch("alpha_forge.cli.print_formatted_text"):
                 exit_code = run_repl(Config(api_key="sk-test"))
 
         self.assertEqual(exit_code, 0)
         self.assertFalse(created["multiline"])
+
+    def test_user_can_type_while_consumer_streams(self) -> None:
+        """The producer must be scheduled between stream chunks so a
+        second user message can be entered while the first response is
+        still streaming. Old sync REPL fails this; async REPL passes."""
+
+        import asyncio
+
+        prompts_seen: list[str] = []
+        inputs = iter(["hello", "second", "/exit"])
+
+        class FakeSession:
+            def __init__(self, **_kwargs) -> None:
+                pass
+
+            async def prompt_async(self, _message: str) -> str:
+                value = next(inputs)
+                prompts_seen.append(value)
+                return value
+
+        class FakeChatClient:
+            def __init__(self, _config: Config) -> None:
+                self.responses: dict[str, str] = {}
+
+            async def stream(self, messages):  # type: ignore[no-untyped-def]
+                last_user = next(
+                    message.content
+                    for message in reversed(messages)
+                    if message.role == "user"
+                )
+                self.responses[last_user] = f"reply-to:{last_user}"
+                for token in list(self.responses[last_user]):
+                    # Yield to the event loop so the producer is given
+                    # a chance to read the next prompt. With the sync
+                    # REPL there is no event loop to yield to, and the
+                    # producer cannot run until the stream is done.
+                    await asyncio.sleep(0)
+                    yield token
+
+            def list_models(self) -> list[str]:
+                return []
+
+        with patch("alpha_forge.cli.PromptSession", FakeSession):
+            with patch("alpha_forge.cli.ChatClient", FakeChatClient):
+                with patch("alpha_forge.cli.print_formatted_text", lambda *_a, **_k: None):
+                    exit_code = run_repl(Config(api_key="sk-test"))
+
+        self.assertEqual(exit_code, 0)
+        # The producer entered all three prompts; in particular it
+        # entered "second" while "reply-to:hello" was still streaming.
+        self.assertEqual(prompts_seen, ["hello", "second", "/exit"])
 
     def test_parser_does_not_expose_system_option(self) -> None:
         help_text = build_parser().format_help()
@@ -98,6 +152,9 @@ class CliTests(unittest.TestCase):
                     return "/model"
                 return "/exit"
 
+            async def prompt_async(self, _message: str) -> str:
+                return self.prompt(_message)
+
         class FakeChatClient:
             def __init__(self, _config: Config) -> None:
                 pass
@@ -126,6 +183,9 @@ class CliTests(unittest.TestCase):
                     self.called = True
                     return "/model"
                 return "/exit"
+
+            async def prompt_async(self, _message: str) -> str:
+                return self.prompt(_message)
 
         class FakeChatClient:
             def __init__(self, _config: Config) -> None:

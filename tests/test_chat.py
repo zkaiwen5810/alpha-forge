@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 
@@ -28,6 +29,34 @@ class FakeModels:
 
     def list(self):
         return self.response
+
+
+class FakeAsyncChunkStream:
+    """Async iterator of synthetic chat-completion chunks."""
+
+    def __init__(self, pieces: list[str]) -> None:
+        self._pieces = pieces
+        self._index = 0
+
+    def __aiter__(self) -> "FakeAsyncChunkStream":
+        return self
+
+    async def __anext__(self) -> SimpleNamespace:
+        if self._index >= len(self._pieces):
+            raise StopAsyncIteration
+        piece = self._pieces[self._index]
+        self._index += 1
+        delta = SimpleNamespace(content=piece) if piece else SimpleNamespace(content=None)
+        return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
+
+
+class FakeAsyncCompletions:
+    def __init__(self) -> None:
+        self.request = None
+
+    async def create(self, **kwargs):
+        self.request = kwargs
+        return FakeAsyncChunkStream(["Hel", "lo, ", "world"])
 
 
 class ChatClientTests(unittest.TestCase):
@@ -62,3 +91,27 @@ class ChatClientTests(unittest.TestCase):
         client = ChatClient(config, client=openai_client)
 
         self.assertEqual(client.list_models(), ["model-a", "model-b"])
+
+    def test_stream_yields_delta_content_in_order_and_requests_stream(self) -> None:
+        completions = FakeAsyncCompletions()
+        async_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        config = Config(api_key="sk-test", model="gpt-test")
+        client = ChatClient(config, async_client=async_client)
+        conversation = Conversation(system_prompt="system")
+        conversation.add_user("hello")
+
+        async def _collect() -> list[str]:
+            return [chunk async for chunk in client.stream(conversation.messages)]
+
+        pieces = asyncio.run(_collect())
+
+        self.assertEqual(pieces, ["Hel", "lo, ", "world"])
+        self.assertEqual(completions.request["model"], "gpt-test")
+        self.assertTrue(completions.request["stream"])
+        self.assertEqual(
+            completions.request["messages"],
+            [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "hello"},
+            ],
+        )
