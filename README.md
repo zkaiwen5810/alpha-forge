@@ -84,6 +84,58 @@ Avoid setting a placeholder `GITHUB_TOKEN` in `.devcontainer/app.env`. Zed may p
 
 Env file changes are runtime configuration. Restart or reopen the devcontainer to make new values effective; rebuilding the image is not required unless Dockerfile or image inputs changed.
 
+## Configuration
+
+The CLI resolves configuration from three layers, highest priority first:
+
+1. **CLI flags** — `--model`, `--base-url`, and `--init-config` (one-shot).
+2. **User config file** — a TOML file at the XDG path `~/.config/alpha-forge/config.toml` (honors `$XDG_CONFIG_HOME`).
+3. **Environment variables** — `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`. A repo-root `.env` file is also loaded.
+
+If no layer provides an `api_key`, the CLI exits with a hint pointing at the user config file. Run `alpha-forge --init-config` to write a commented template you can edit.
+
+### User config file
+
+The user config file is the recommended place for persistent personal settings (your API key, your preferred model, your LiteLLM base URL). Generate it once and edit it in place:
+
+```sh
+alpha-forge --init-config
+# then edit ~/.config/alpha-forge/config.toml
+```
+
+Format — one `[openai]` table, only the keys you need:
+
+```toml
+[openai]
+api_key = "sk-..."
+model = "gpt-4.1-mini"
+base_url = "https://api.openai.com/v1"
+```
+
+Unknown top-level keys are ignored for forward compatibility. A malformed file is a hard error — the CLI will not silently fall through to env vars. API keys are never accepted on the command line; use the file or an env var.
+
+### CLI flags
+
+```sh
+alpha-forge --model gpt-4o
+alpha-forge --base-url http://localhost:4000/v1
+alpha-forge --init-config
+```
+
+The CLI flags override the user file, which overrides env vars. The built-in default for `model` is `gpt-4.1-mini`.
+
+### Environment variables
+
+The env var layer is the lowest-priority source. It is also the easiest way to script the CLI in CI or in shell aliases without touching a config file:
+
+```env
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4.1-mini
+OPENAI_BASE_URL=https://api.openai.com/v1
+```
+
+`.env` files in the working directory are loaded via `python-dotenv` (existing var values are not overridden).
+
 ## LiteLLM proxy
 
 The devcontainer starts a LiteLLM proxy next to the main app container with Docker Compose. The proxy is available at `http://localhost:4000` from the host.

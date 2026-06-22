@@ -1,15 +1,21 @@
 """Basic multi-turn chat CLI."""
-
 from __future__ import annotations
 
 import argparse
+import sys
 
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.history import InMemoryHistory
 
 from alpha_forge.chat import ChatClient
-from alpha_forge.config import Config, ConfigError
+from alpha_forge.config import (
+    Config,
+    ConfigError,
+    InitConfigAction,
+    build_config,
+    default_user_config_path,
+)
 from alpha_forge.conversation import Conversation
 from alpha_forge.slash_commands import SLASH_COMMANDS, SlashCommandCompleter, SlashCommandHandler
 from alpha_forge.slash_commands.base import CommandContext
@@ -20,8 +26,23 @@ DEFAULT_SYSTEM_PROMPT = "You are Alpha Forge, a concise and helpful assistant."
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="alpha-forge")
-    parser.add_argument("--model", help="Override OPENAI_MODEL for this run")
-    parser.add_argument("--base-url", help="Override OPENAI_BASE_URL for this run")
+    parser.add_argument(
+        "--model",
+        default=argparse.SUPPRESS,
+        help="Override model for this run",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=argparse.SUPPRESS,
+        help="Override OPENAI_BASE_URL for this run",
+    )
+    parser.add_argument(
+        "--init-config",
+        action="store_true",
+        help=(
+            f"write a template config to {default_user_config_path()} and exit"
+        ),
+    )
     return parser
 
 
@@ -79,19 +100,13 @@ def run_repl(config: Config, *, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> i
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-
     try:
-        config = Config.from_env()
+        config = build_config(args)
+    except InitConfigAction as action:
+        return action.exit_code
     except ConfigError as exc:
-        parser.error(str(exc))
-
-    if args.model or args.base_url:
-        config = Config(
-            api_key=config.api_key,
-            model=args.model or config.model,
-            base_url=args.base_url or config.base_url,
-        )
-
+        print(f"alpha-forge: {exc}", file=sys.stderr)
+        return 2
     return run_repl(config)
 
 
