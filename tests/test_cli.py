@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import io
 import os
@@ -6,11 +7,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from prompt_toolkit.completion import CompleteEvent
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
+from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+from prompt_toolkit.output import DummyOutput
 
-from alpha_forge.cli import build_parser, main, run_repl
+from alpha_forge.cli import build_parser, main
 from alpha_forge.config import Config
+from alpha_forge.session import ChatReplController
 from alpha_forge.slash_commands import SlashCommandCompleter
+from alpha_forge.terminal_ui import TerminalChatUi
 
 
 @contextlib.contextmanager
@@ -42,48 +50,434 @@ def _capture_run_repl():
 
 
 class CliTests(unittest.TestCase):
+    def _controller(self, chat) -> ChatReplController:  # type: ignore[no-untyped-def]
+        return ChatReplController(Config(api_key="sk-test"), chat=chat)
+
     def test_prompt_submits_on_enter(self) -> None:
-        created = {}
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
 
-        class FakeSession:
-            def __init__(self, **kwargs) -> None:
-                created.update(kwargs)
+            def list_models(self) -> list[str]:
+                return []
 
-            def prompt(self, _message: str) -> str:
-                return "/exit"
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            ui.input_area.text = "hello"
 
-            async def prompt_async(self, _message: str) -> str:
-                return self.prompt(_message)
+            self.assertFalse(ui._has_pending_prompts())
+            keep_text = ui.input_area.buffer.accept_handler(ui.input_area.buffer)
 
-        with patch("alpha_forge.cli.PromptSession", FakeSession):
-            with patch("alpha_forge.cli.print_formatted_text"):
-                exit_code = run_repl(Config(api_key="sk-test"))
+        self.assertFalse(keep_text)
+        self.assertFalse(ui.input_area.buffer.multiline())
+        completions = list(
+            ui.input_area.buffer.completer.get_completions(
+                Document("/m"),
+                CompleteEvent(completion_requested=True),
+            )
+        )
+        self.assertEqual(completions, [])
+        self.assertTrue(ui._has_pending_prompts())
+        self.assertEqual(controller.state.pending_prompts, ["hello"])
 
-        self.assertEqual(exit_code, 0)
-        self.assertFalse(created["multiline"])
+    def test_slash_suggestions_render_in_prompt_subpanel(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+
+            self.assertFalse(ui._should_show_slash_suggestions())
+            ui.input_area.text = "/m"
+
+            self.assertTrue(ui._should_show_slash_suggestions())
+            self.assertIn("/model", ui.slash_suggestions_area.text)
+            self.assertIn("List available models", ui.slash_suggestions_area.text)
+
+    def test_mouse_support_defaults_to_history_scroll_mode(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+
+            self.assertTrue(ui._mouse_enabled)
+            self.assertIn("mouse-scroll", ui._status_text())
+            self.assertIn("F2 toggle", ui._status_text())
+
+    def test_mouse_mode_can_be_toggled_for_terminal_selection(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            ui._toggle_mouse_mode()
+
+            self.assertFalse(ui._mouse_enabled)
+            self.assertIn("copy-select", ui._status_text())
+            self.assertIn("terminal selection enabled", ui._status_text())
+
+    def test_copy_history_writes_osc52_clipboard_sequence(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        controller.state.add_notice("copy me")
+        output = DummyOutput()
+        writes: list[str] = []
+        flushes: list[bool] = []
+
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=output,
+            )
+            output.write_raw = writes.append  # type: ignore[method-assign]
+            output.flush = lambda: flushes.append(True)  # type: ignore[method-assign]
+            ui._copy_history_to_terminal_clipboard()
+
+        expected_payload = base64.b64encode(b"copy me").decode()
+        self.assertEqual(writes, [f"\x1b]52;c;{expected_payload}\a"])
+        self.assertEqual(flushes, [True])
+        self.assertIn("conversation copied", ui._status_text())
+
+    def test_history_control_exposes_complete_scrollable_content(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        controller.state.add_notice("\n".join(f"line {index}" for index in range(30)))
+
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            content = ui.history_control.create_content(80, 5)
+
+        self.assertEqual(content.line_count, 30)
+        self.assertEqual(ui._history_total_lines, 30)
+        self.assertEqual(ui._history_view_height, 5)
+        self.assertEqual(ui._history_scroll_offset, 25)
+        self.assertEqual(content.cursor_position.y, 25)
+        self.assertEqual(content.get_line(0), [("class:notice-message", "line 0")])
+        self.assertEqual(content.get_line(29), [("class:notice-message", "line 29")])
+
+    def test_mouse_wheel_scroll_routes_to_history_viewport(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            ui._history_total_lines = 100
+            ui._history_view_height = 10
+            ui._history_scroll_offset = 10
+            ui._history_follow_tail = False
+
+            ui._scroll_history_lines(-3)
+            self.assertEqual(ui._history_scroll_offset, 7)
+
+            ui._scroll_history_lines(3)
+            self.assertEqual(ui._history_scroll_offset, 10)
+
+    def test_mouse_wheel_over_prompt_scrolls_history(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            ui._history_total_lines = 100
+            ui._history_view_height = 10
+            ui._history_scroll_offset = 10
+            ui._history_follow_tail = False
+            event = MouseEvent(
+                position=Point(x=0, y=0),
+                event_type=MouseEventType.SCROLL_UP,
+                button=MouseButton.NONE,
+                modifiers=frozenset(),
+            )
+
+            ui.input_area.control.mouse_handler(event)
+
+        self.assertEqual(ui._history_scroll_offset, 7)
+
+    def test_mouse_wheel_over_history_scrolls_history(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            ui._history_total_lines = 100
+            ui._history_view_height = 10
+            ui._history_scroll_offset = 10
+            ui._history_follow_tail = False
+            event = MouseEvent(
+                position=Point(x=0, y=0),
+                event_type=MouseEventType.SCROLL_DOWN,
+                button=MouseButton.NONE,
+                modifiers=frozenset(),
+            )
+
+            ui.history_control.mouse_handler(event)
+
+        self.assertEqual(ui._history_scroll_offset, 13)
+
+    def test_history_scroll_normalizes_tail_sentinel_before_wheel_delta(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            ui._history_total_lines = 110
+            ui._history_view_height = 10
+            ui._history_follow_tail = True
+
+            ui._scroll_history_lines(-3)
+
+        self.assertEqual(ui._history_scroll_offset, 97)
+
+    def test_slash_suggestions_are_below_prompt_input(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            root = ui._root_container()
+
+            self.assertIs(root.children[-2], ui.input_area.window)
+
+    def test_enter_autocompletes_partial_slash_command(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            ui.input_area.text = "/m"
+
+            keep_text = ui.input_area.buffer.accept_handler(ui.input_area.buffer)
+
+        self.assertTrue(keep_text)
+        self.assertEqual(ui.input_area.text, "/model")
+        self.assertEqual(controller.state.pending_prompts, [])
+
+    def test_tab_uses_slash_autocomplete(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            ui.input_area.text = "/m"
+
+            completed = ui._complete_slash_command()
+
+        self.assertTrue(completed)
+        self.assertEqual(ui.input_area.text, "/model")
+
+    def test_history_refresh_preserves_scrolled_position(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            controller.state.add_notice("\n".join(f"line {index}" for index in range(20)))
+            ui.refresh()
+            ui._history_follow_tail = False
+            ui._history_scroll_offset = 1
+
+            ui.refresh()
+            self.assertEqual(ui._history_scroll_offset, 1)
+
+            controller.state.add_notice("new tail")
+            ui.refresh()
+
+        self.assertEqual(ui._history_scroll_offset, 1)
+
+    def test_pageup_scrolls_history_without_focusing_history(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            controller.state.add_notice("\n".join(f"line {index}" for index in range(20)))
+            ui.refresh()
+            ui._history_total_lines = 200
+            ui._history_view_height = 20
+            ui._history_scroll_offset = 100
+            ui._history_follow_tail = False
+            starting_scroll = ui._history_scroll_offset
+
+            ui._scroll_history_page(-1)
+
+        self.assertLess(ui._history_scroll_offset, starting_scroll)
+
+    def test_slash_suggestions_hide_after_command_argument(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            ui.input_area.text = "/model extra"
+
+            self.assertFalse(ui._should_show_slash_suggestions())
 
     def test_user_can_type_while_consumer_streams(self) -> None:
-        """The producer must be scheduled between stream chunks so a
-        second user message can be entered while the first response is
-        still streaming. Old sync REPL fails this; async REPL passes."""
+        """A second user message can be accepted while the first response
+        is still streaming."""
 
         import asyncio
 
-        prompts_seen: list[str] = []
-        inputs = iter(["hello", "second", "/exit"])
-
-        class FakeSession:
-            def __init__(self, **_kwargs) -> None:
-                pass
-
-            async def prompt_async(self, _message: str) -> str:
-                value = next(inputs)
-                prompts_seen.append(value)
-                return value
-
         class FakeChatClient:
-            def __init__(self, _config: Config) -> None:
+            def __init__(self) -> None:
                 self.responses: dict[str, str] = {}
+                self.started = asyncio.Event()
 
             async def stream(self, messages):  # type: ignore[no-untyped-def]
                 last_user = next(
@@ -92,26 +486,86 @@ class CliTests(unittest.TestCase):
                     if message.role == "user"
                 )
                 self.responses[last_user] = f"reply-to:{last_user}"
+                self.started.set()
                 for token in list(self.responses[last_user]):
-                    # Yield to the event loop so the producer is given
-                    # a chance to read the next prompt. With the sync
-                    # REPL there is no event loop to yield to, and the
-                    # producer cannot run until the stream is done.
                     await asyncio.sleep(0)
                     yield token
 
             def list_models(self) -> list[str]:
                 return []
 
-        with patch("alpha_forge.cli.PromptSession", FakeSession):
-            with patch("alpha_forge.cli.ChatClient", FakeChatClient):
-                with patch("alpha_forge.cli.print_formatted_text", lambda *_a, **_k: None):
-                    exit_code = run_repl(Config(api_key="sk-test"))
+        async def scenario() -> ChatReplController:
+            chat = FakeChatClient()
+            controller = self._controller(chat)
+            exit_codes: list[int] = []
+            controller.request_app_exit = exit_codes.append
 
-        self.assertEqual(exit_code, 0)
-        # The producer entered all three prompts; in particular it
-        # entered "second" while "reply-to:hello" was still streaming.
-        self.assertEqual(prompts_seen, ["hello", "second", "/exit"])
+            consumer_task = asyncio.create_task(controller.consume())
+            controller.submit("hello")
+            await chat.started.wait()
+            controller.submit("second")
+            controller.request_exit()
+            await consumer_task
+
+            self.assertEqual(exit_codes, [0])
+            return controller
+
+        controller = asyncio.run(scenario())
+
+        self.assertEqual(controller.state.pending_prompts, [])
+        self.assertIn("reply-to:hello", controller.state.render_history())
+        self.assertIn("reply-to:second", controller.state.render_history())
+        self.assertNotIn("You:", controller.state.render_history())
+        self.assertNotIn("Alpha:", controller.state.render_history())
+
+    def test_user_messages_use_distinct_history_style(self) -> None:
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        entry = controller.state.start_turn("hello")
+        controller.state.append_to_response(entry, "reply")
+        controller.state.render_history()
+
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            fragments = ui._history_fragments()
+
+        self.assertEqual(fragments[0], ("class:user-message", " hello "))
+
+    def test_failed_response_is_rendered_in_history(self) -> None:
+        import asyncio
+
+        class FakeChatClient:
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                raise RuntimeError("boom")
+                if False:
+                    yield ""
+
+            def list_models(self) -> list[str]:
+                return []
+
+        async def scenario() -> ChatReplController:
+            controller = self._controller(FakeChatClient())
+            consumer_task = asyncio.create_task(controller.consume())
+            controller.submit("hello")
+            controller.request_exit()
+            await consumer_task
+            return controller
+
+        controller = asyncio.run(scenario())
+
+        self.assertEqual(controller.state.pending_prompts, [])
+        self.assertIn("request failed: boom", controller.state.render_history())
 
     def test_parser_does_not_expose_system_option(self) -> None:
         help_text = build_parser().format_help()
@@ -140,66 +594,40 @@ class CliTests(unittest.TestCase):
         self.assertEqual(completions, [])
 
     def test_model_command_lists_models_and_marks_current_model(self) -> None:
-        output = []
-
-        class FakeSession:
-            def __init__(self, **_kwargs) -> None:
-                pass
-
-            def prompt(self, _message: str) -> str:
-                if not hasattr(self, "called"):
-                    self.called = True
-                    return "/model"
-                return "/exit"
-
-            async def prompt_async(self, _message: str) -> str:
-                return self.prompt(_message)
-
         class FakeChatClient:
-            def __init__(self, _config: Config) -> None:
-                pass
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
 
             def list_models(self) -> list[str]:
                 return ["gpt-other", "gpt-test"]
 
-        with patch("alpha_forge.cli.PromptSession", FakeSession):
-            with patch("alpha_forge.cli.ChatClient", FakeChatClient):
-                with patch("alpha_forge.cli.print_formatted_text", output.append):
-                    exit_code = run_repl(Config(api_key="sk-test", model="gpt-test"))
+        controller = ChatReplController(
+            Config(api_key="sk-test", model="gpt-test"),
+            chat=FakeChatClient(),
+        )
+        controller.submit("/model")
+        output = controller.state.render_history()
 
-        self.assertEqual(exit_code, 0)
         self.assertIn("  gpt-other", output)
         self.assertIn("* gpt-test", output)
 
     def test_model_command_marks_provider_prefixed_current_model(self) -> None:
-        output = []
-
-        class FakeSession:
-            def __init__(self, **_kwargs) -> None:
-                pass
-
-            def prompt(self, _message: str) -> str:
-                if not hasattr(self, "called"):
-                    self.called = True
-                    return "/model"
-                return "/exit"
-
-            async def prompt_async(self, _message: str) -> str:
-                return self.prompt(_message)
-
         class FakeChatClient:
-            def __init__(self, _config: Config) -> None:
-                pass
+            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ""
 
             def list_models(self) -> list[str]:
                 return ["openai/gpt-4o"]
 
-        with patch("alpha_forge.cli.PromptSession", FakeSession):
-            with patch("alpha_forge.cli.ChatClient", FakeChatClient):
-                with patch("alpha_forge.cli.print_formatted_text", output.append):
-                    exit_code = run_repl(Config(api_key="sk-test", model="gpt-4o"))
+        controller = ChatReplController(
+            Config(api_key="sk-test", model="gpt-4o"),
+            chat=FakeChatClient(),
+        )
+        controller.submit("/model")
+        output = controller.state.render_history()
 
-        self.assertEqual(exit_code, 0)
         self.assertIn("* openai/gpt-4o", output)
 
     # --- Layered-merge end-to-end tests (drive main() and inspect Config) ---

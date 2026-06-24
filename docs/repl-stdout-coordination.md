@@ -76,7 +76,7 @@ schedules **one** `run_in_terminal(suspend → write → resume)` cycle.
 > `patch_stdout` is that "step aside" request. Buffer your writes so the
 > step-aside happens once at the end, not per token.
 
-## Why we don't stream incrementally today
+## Why direct stdout streaming failed
 
 The naïve way to stream the response is one flush per token — that
 gives the user real-time feedback as tokens arrive. But it fails for
@@ -92,13 +92,25 @@ two distinct reasons:
    terminal emulators. Some interpret them correctly; others display
    them as literal characters, producing visibly jumbled output.
 
-The codebase therefore buffers the streamed chunks in memory and
-renders the response as a single block once the stream finishes.
-The visible behavior is "all at once", but the network call is
-still the streaming endpoint (so the producer can keep typing
-while the consumer is mid-response).
+Before the full-screen UI, the safer fallback was to buffer streamed
+chunks in memory and render the response as a single block once the
+stream finished. The network call still used the streaming endpoint, so
+the producer could keep accepting prompts while the consumer was
+mid-response.
 
-## The pattern used in this codebase
+## The pattern used in this codebase now
+
+The CLI now avoids this class of bug by running a single full-screen
+`prompt_toolkit.application.Application` in `alpha_forge/terminal_ui.py`.
+Conversation history, queued prompts, status text, and the prompt input
+are all prompt-toolkit controls in one layout. Background streaming
+updates mutate in-memory UI state and call `Application.invalidate()`;
+they no longer write directly to stdout or move the terminal cursor.
+
+That gives prompt-toolkit one renderer that owns the screen while the app
+is running, instead of two writers competing for the same terminal grid.
+
+## Legacy buffered-output pattern
 
 ```python
 # Drain the stream into an in-memory buffer.
