@@ -115,6 +115,9 @@ class TerminalChatUi:
             input=input,
             output=output,
         )
+        # Wire controller events back into this prompt-toolkit view. The
+        # controller owns chat/session state; the UI owns rendering and app
+        # shutdown, so these hooks are the boundary between the two.
         self.controller.request_redraw = self.refresh
         self.controller.request_app_exit = self.exit
         self.refresh()

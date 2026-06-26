@@ -153,6 +153,9 @@ class ChatReplController:
         self.state = ChatUiState()
         self.queue: asyncio.Queue[WorkItem | None] = asyncio.Queue()
         self.exiting = False
+        # UI lifecycle hooks. They default to no-ops so the controller can be
+        # unit-tested headlessly, then TerminalChatUi installs prompt-toolkit
+        # callbacks that redraw or exit the full-screen app.
         self.request_redraw: Redraw = lambda: None
         self.request_app_exit: ExitRequest = lambda _exit_code: None
 
