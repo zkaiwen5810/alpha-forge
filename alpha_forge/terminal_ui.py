@@ -32,9 +32,11 @@ class HistoryControl(UIControl):
         self.ui = ui
 
     def is_focusable(self) -> bool:
+        """Tell prompt-toolkit this custom control can receive focus."""
         return True
 
     def create_content(self, _width: int, _height: int | None) -> UIContent:
+        """Build the renderable content prompt-toolkit asks a UIControl for."""
         lines = self.ui._history_line_fragments(_width, _height)
         return UIContent(
             get_line=lambda index: lines[index],
@@ -44,6 +46,7 @@ class HistoryControl(UIControl):
         )
 
     def mouse_handler(self, mouse_event: MouseEvent):
+        """Handle mouse events that prompt-toolkit routes to this control."""
         return self.ui._handle_mouse_scroll(mouse_event)
 
 
@@ -117,10 +120,12 @@ class TerminalChatUi:
         self.refresh()
 
     async def run_async(self) -> int:
+        """Run the underlying prompt-toolkit application until it exits."""
         result = await self.app.run_async()
         return int(result or 0)
 
     def refresh(self) -> None:
+        """Refresh widget text and ask prompt-toolkit to redraw the screen."""
         self._set_text(self.pending_area, self.controller.state.render_pending())
         self._set_text(
             self.slash_suggestions_area,
@@ -131,10 +136,12 @@ class TerminalChatUi:
             self.app.invalidate()
 
     def exit(self, exit_code: int) -> None:
+        """Exit callback installed on the controller for prompt-toolkit shutdown."""
         if self.app.is_running:
             self.app.exit(result=exit_code)
 
     def _accept_input(self, _buffer) -> bool:  # type: ignore[no-untyped-def]
+        """TextArea accept_handler hook called by prompt-toolkit on Enter."""
         if self._complete_slash_command():
             return True
         self.controller.submit(self.input_area.text)
@@ -227,6 +234,7 @@ class TerminalChatUi:
         return True
 
     def _input_changed(self, _buffer) -> None:  # type: ignore[no-untyped-def]
+        """Buffer change hook used to update slash suggestions while typing."""
         self.refresh()
 
     def _history_fragments(self) -> list[tuple[str, str]]:
@@ -287,6 +295,7 @@ class TerminalChatUi:
         }[role]
 
     def _status_text(self) -> str:
+        """FormattedTextControl callback that recomputes the status bar text."""
         mouse_mode = "mouse-scroll" if self._mouse_enabled else "copy-select"
         status = self._ui_status or self.controller.state.status
         return (
@@ -358,9 +367,11 @@ class TerminalChatUi:
         return self.controller.state.render_history()
 
     def _route_scroll_events_to_history(self, control) -> None:  # type: ignore[no-untyped-def]
+        """Wrap a prompt-toolkit mouse handler so wheel events scroll history."""
         original_mouse_handler = control.mouse_handler
 
         def mouse_handler(mouse_event: MouseEvent):
+            """Mouse handler shim installed onto prompt-toolkit controls."""
             result = self._handle_mouse_scroll(mouse_event)
             if result is not NotImplemented:
                 return result
@@ -369,6 +380,7 @@ class TerminalChatUi:
         control.mouse_handler = mouse_handler
 
     def _handle_mouse_scroll(self, mouse_event: MouseEvent):
+        """Shared prompt-toolkit mouse event hook for history scrolling."""
         if mouse_event.event_type == MouseEventType.SCROLL_UP:
             self._scroll_history_lines(-3)
             return None
@@ -395,6 +407,7 @@ class TerminalChatUi:
             self.app.invalidate()
 
     def _get_history_vertical_scroll(self, _window: Window) -> int:
+        """Window get_vertical_scroll callback for the history viewport."""
         self._sync_history_scroll()
         return self._history_scroll_offset
 
