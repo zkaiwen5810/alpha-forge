@@ -223,7 +223,7 @@ class SessionToolLoopTests(unittest.TestCase):
             ],
         )
 
-    def test_next_turn_does_not_replay_completed_tool_protocol_messages(self) -> None:
+    def test_next_turn_preserves_completed_tool_protocol_messages(self) -> None:
         chat = ScriptedToolChat(
             [
                 [
@@ -263,10 +263,14 @@ class SessionToolLoopTests(unittest.TestCase):
             [
                 ("system", "You are Alpha Forge, a concise and helpful assistant."),
                 ("user", "calculate 2 * 9"),
+                ("assistant", None),
+                ("tool", "18"),
                 ("assistant", "The answer is 18."),
                 ("user", "3 / 5"),
             ],
         )
+        self.assertEqual(next_turn[2].tool_calls[0].id, "call-1")
+        self.assertEqual(next_turn[3].tool_call_id, "call-1")
 
     def test_stops_after_tool_iteration_limit(self) -> None:
         iterations = [

@@ -8,9 +8,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from alpha_forge.chat import ChatClient
+from alpha_forge.chat import ChatClient, ChatStreamEvent
 from alpha_forge.config import Config
-from alpha_forge.conversation import Conversation, Message, ToolCall
+from alpha_forge.conversation import Conversation, ToolCall
 from alpha_forge.slash_commands import SlashCommandHandler
 from alpha_forge.slash_commands.base import CommandContext
 from alpha_forge.tools import ToolError, ToolRegistry, load_builtin_tools
@@ -321,115 +321,30 @@ class ChatReplController:
         self.request_redraw()
 
         self.conversation.add_user(item.prompt)
-        messages = self.conversation.messages
         try:
             for iteration_index in range(MAX_TOOL_ITERATIONS):
-                iteration = IterationOutput()
-                pending_calls: dict[int, _PendingToolCall] = {}
-                async for event in self.chat.stream_response(
-                    messages,
-                    tools=self.tool_registry.definitions(),
-                ):
-                    if event.type == "text_delta":
-                        iteration = replace(
-                            iteration,
-                            assistant_text=iteration.assistant_text + event.text,
-                        )
-                        self.state.set_iteration(
-                            turn,
-                            iteration_index,
-                            iteration,
-                        )
-                        self.request_redraw()
-                        continue
-
-                    if event.index is None:
-                        raise RuntimeError("tool-call delta is missing its index")
-                    if not iteration.tool_requesting:
-                        iteration = replace(iteration, tool_requesting=True)
-                        self.state.set_iteration(
-                            turn,
-                            iteration_index,
-                            iteration,
-                        )
-                        self.request_redraw()
-                    pending = pending_calls.setdefault(
-                        event.index, _PendingToolCall()
-                    )
-                    pending.call_id += event.call_id
-                    pending.name += event.name
-                    pending.arguments += event.arguments
-
-                tool_calls = tuple(
-                    ToolCall(
-                        id=pending.call_id,
-                        name=pending.name,
-                        arguments=pending.arguments,
-                    )
-                    for _, pending in sorted(pending_calls.items())
+                iteration, tool_calls = await self._stream_iteration(
+                    turn,
+                    iteration_index,
                 )
                 if not tool_calls:
-                    self.state.set_iteration(
+                    self._finish_assistant_turn(
                         turn,
                         iteration_index,
                         iteration,
                     )
-                    self.conversation.add_assistant(iteration.assistant_text)
-                    self.state.finish_turn(turn)
-                    self.request_redraw()
                     return
 
-                assistant_content = iteration.assistant_text or None
-                messages.append(
-                    Message(
-                        "assistant",
-                        assistant_content,
-                        tool_calls=tool_calls,
-                    )
+                self.conversation.add_assistant(
+                    iteration.assistant_text or None,
+                    tool_calls=tool_calls,
                 )
-                for tool_call in tool_calls:
-                    exchange = ToolExchange(
-                        name=tool_call.name,
-                        arguments=tool_call.arguments,
-                    )
-                    iteration = replace(
-                        iteration,
-                        tools=(*iteration.tools, exchange),
-                    )
-                    self.state.set_iteration(
-                        turn,
-                        iteration_index,
-                        iteration,
-                    )
-                    self.request_redraw()
-                    await asyncio.sleep(0)
-
-                    result, failed = self._execute_tool_call(tool_call)
-                    messages.append(
-                        Message(
-                            "tool",
-                            result,
-                            tool_call_id=tool_call.id,
-                        )
-                    )
-                    completed_exchange = replace(
-                        exchange,
-                        result=result,
-                        failed=failed,
-                    )
-                    iteration = replace(
-                        iteration,
-                        tools=(
-                            *iteration.tools[:-1],
-                            completed_exchange,
-                        ),
-                    )
-                    self.state.set_iteration(
-                        turn,
-                        iteration_index,
-                        iteration,
-                    )
-                    self.request_redraw()
+                await self._run_tool_calls(
+                    turn,
+                    iteration_index,
+                    iteration,
+                    tool_calls,
+                )
             raise RuntimeError(
                 f"tool iteration limit reached ({MAX_TOOL_ITERATIONS})"
             )
@@ -440,6 +355,142 @@ class ChatReplController:
             )
             self.request_redraw()
             return
+
+    async def _stream_iteration(
+        self,
+        turn: ConversationTurnBlock,
+        iteration_index: int,
+    ) -> tuple[IterationOutput, tuple[ToolCall, ...]]:
+        iteration = IterationOutput()
+        pending_calls: dict[int, _PendingToolCall] = {}
+
+        async for event in self.chat.stream_response(
+            self.conversation.messages,
+            tools=self.tool_registry.definitions(),
+        ):
+            if event.type == "text_delta":
+                iteration = self._add_text_delta(
+                    turn,
+                    iteration_index,
+                    iteration,
+                    event.text,
+                )
+            else:
+                iteration = self._add_tool_call_delta(
+                    turn,
+                    iteration_index,
+                    iteration,
+                    pending_calls,
+                    event,
+                )
+
+        return iteration, self._build_tool_calls(pending_calls)
+
+    def _add_text_delta(
+        self,
+        turn: ConversationTurnBlock,
+        iteration_index: int,
+        iteration: IterationOutput,
+        text: str,
+    ) -> IterationOutput:
+        updated = replace(
+            iteration,
+            assistant_text=iteration.assistant_text + text,
+        )
+        self._publish_iteration(turn, iteration_index, updated)
+        return updated
+
+    def _add_tool_call_delta(
+        self,
+        turn: ConversationTurnBlock,
+        iteration_index: int,
+        iteration: IterationOutput,
+        pending_calls: dict[int, _PendingToolCall],
+        event: ChatStreamEvent,
+    ) -> IterationOutput:
+        if event.index is None:
+            raise RuntimeError("tool-call delta is missing its index")
+
+        updated = iteration
+        if not updated.tool_requesting:
+            updated = replace(updated, tool_requesting=True)
+            self._publish_iteration(turn, iteration_index, updated)
+
+        pending = pending_calls.setdefault(event.index, _PendingToolCall())
+        pending.call_id += event.call_id
+        pending.name += event.name
+        pending.arguments += event.arguments
+        return updated
+
+    @staticmethod
+    def _build_tool_calls(
+        pending_calls: dict[int, _PendingToolCall],
+    ) -> tuple[ToolCall, ...]:
+        return tuple(
+            ToolCall(
+                id=pending.call_id,
+                name=pending.name,
+                arguments=pending.arguments,
+            )
+            for _, pending in sorted(pending_calls.items())
+        )
+
+    async def _run_tool_calls(
+        self,
+        turn: ConversationTurnBlock,
+        iteration_index: int,
+        iteration: IterationOutput,
+        tool_calls: tuple[ToolCall, ...],
+    ) -> IterationOutput:
+        updated = iteration
+        for tool_call in tool_calls:
+            exchange = ToolExchange(
+                name=tool_call.name,
+                arguments=tool_call.arguments,
+            )
+            updated = replace(
+                updated,
+                tools=(*updated.tools, exchange),
+            )
+            self._publish_iteration(turn, iteration_index, updated)
+            await asyncio.sleep(0)
+
+            result, failed = self._execute_tool_call(tool_call)
+            self.conversation.add_tool(result, tool_call_id=tool_call.id)
+            completed_exchange = replace(
+                exchange,
+                result=result,
+                failed=failed,
+            )
+            updated = replace(
+                updated,
+                tools=(
+                    *updated.tools[:-1],
+                    completed_exchange,
+                ),
+            )
+            self._publish_iteration(turn, iteration_index, updated)
+        return updated
+
+    def _finish_assistant_turn(
+        self,
+        turn: ConversationTurnBlock,
+        iteration_index: int,
+        iteration: IterationOutput,
+    ) -> None:
+        self._publish_iteration(turn, iteration_index, iteration)
+        self.conversation.add_assistant(iteration.assistant_text)
+        self.state.finish_turn(turn)
+        self.request_redraw()
+
+    def _publish_iteration(
+        self,
+        turn: ConversationTurnBlock,
+        iteration_index: int,
+        iteration: IterationOutput,
+    ) -> None:
+        self.state.set_iteration(turn, iteration_index, iteration)
+        self.request_redraw()
 
     def _execute_tool_call(self, tool_call: ToolCall) -> tuple[str, bool]:
         try:

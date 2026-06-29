@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from openai import OpenAI; print\\('openai ok'\\)\")",
+      "Bash(python -c \"from openai import AsyncOpenAI; print\\('async openai ok'\\)\")",
+      "Bash(python *)"
+    ]
+  }
+}
