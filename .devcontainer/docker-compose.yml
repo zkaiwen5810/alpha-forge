@@ -15,7 +15,7 @@ services:
       - alpha-forge-repo:/workspaces/alpha-forge
 
   litellm:
-    image: ghcr.io/berriai/litellm-database:main-latest
+    image: ghcr.io/berriai/litellm-database:v1.90.0
     command:
       - --config=/app/config.yaml
       - --port=4000

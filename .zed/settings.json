@@ -1,0 +1,20 @@
+{
+  "languages": {
+    "YAML": {
+      "tab_size": 2,
+      "formatter": "language_server",
+      "format_on_save": "on"
+    }
+  },
+  "lsp": {
+    "yaml-language-server": {
+      "settings": {
+        "yaml": {
+          "format": {
+            "indent": 2
+          }
+        }
+      }
+    }
+  }
+}
