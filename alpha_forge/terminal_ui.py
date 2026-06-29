@@ -262,16 +262,10 @@ class TerminalChatUi:
         return lines or [[("", "")]]
 
     def _history_display_line_fragments(self, width: int) -> list[list[tuple[str, str]]]:
-        text = self.controller.state.render_history()
-        lines = text.splitlines() or [""]
         fragments: list[list[tuple[str, str]]] = []
-        for lineno, line in enumerate(lines):
-            try:
-                role = self.controller.state.history_line_roles[lineno]
-            except IndexError:
-                role = "assistant"
-            style = self._history_line_style(role)
-            for wrapped_line in self._wrap_history_line(line, width):
+        for line in self.controller.state.history_lines():
+            style = self._history_line_style(line.role)
+            for wrapped_line in self._wrap_history_line(line.text, width):
                 fragments.append([(style, wrapped_line)])
         return fragments
 
@@ -291,7 +285,10 @@ class TerminalChatUi:
     def _history_line_style(role: str) -> str:
         return {
             "user": "class:user-message",
-            "assistant": "",
+            "assistant": "class:assistant-message",
+            "assistant_note": "class:assistant-note-message",
+            "tool_call": "class:tool-call-message",
+            "tool_result": "class:tool-result-message",
             "notice": "class:notice-message",
             "error": "class:error-message",
             "spacer": "",
@@ -367,7 +364,7 @@ class TerminalChatUi:
             self.app.invalidate()
 
     def _history_plain_text(self) -> str:
-        return self.controller.state.render_history()
+        return self.controller.state.history_text()
 
     def _route_scroll_events_to_history(self, control) -> None:  # type: ignore[no-untyped-def]
         """Wrap a prompt-toolkit mouse handler so wheel events scroll history."""
@@ -475,6 +472,10 @@ class TerminalChatUi:
                 "scrollbar.background": "#666666",
                 "scrollbar.button": "bg:#bbbbbb",
                 "user-message": "bg:#2f4f4f #ffffff",
+                "assistant-message": "",
+                "assistant-note-message": "italic #5fd7ff",
+                "tool-call-message": "#5fafff",
+                "tool-result-message": "#5faf87",
                 "notice-message": "#888888",
                 "error-message": "#ff5f5f",
             }

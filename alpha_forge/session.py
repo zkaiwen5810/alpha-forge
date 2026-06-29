@@ -3,21 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from alpha_forge.chat import ChatClient
 from alpha_forge.config import Config
-from alpha_forge.conversation import Conversation, Message
+from alpha_forge.conversation import Conversation, Message, ToolCall
 from alpha_forge.slash_commands import SlashCommandHandler
 from alpha_forge.slash_commands.base import CommandContext
+from alpha_forge.tools import ToolError, ToolRegistry, load_builtin_tools
 
 
 DEFAULT_SYSTEM_PROMPT = "You are Alpha Forge, a concise and helpful assistant."
+MAX_TOOL_ITERATIONS = 10
 
-Role = Literal["user", "assistant", "notice", "error"]
-LineRole = Literal["user", "assistant", "notice", "error", "spacer"]
+HistoryRole = Literal[
+    "user",
+    "assistant",
+    "assistant_note",
+    "tool_call",
+    "tool_result",
+    "notice",
+    "error",
+    "spacer",
+]
 Redraw = Callable[[], None]
 ExitRequest = Callable[[int], None]
 
@@ -25,20 +36,57 @@ ExitRequest = Callable[[int], None]
 @dataclass(frozen=True)
 class WorkItem:
     prompt: str
-    messages: list[Message]
+
+
+@dataclass(frozen=True)
+class ToolExchange:
+    name: str
+    arguments: str
+    result: str | None = None
+    failed: bool = False
+
+
+@dataclass(frozen=True)
+class IterationOutput:
+    assistant_text: str = ""
+    tools: tuple[ToolExchange, ...] = ()
+    tool_requesting: bool = False
+
+
+@dataclass(eq=False)
+class ConversationTurnBlock:
+    prompt: str
+    iterations: list[IterationOutput]
+    error: str | None = None
+    complete: bool = False
+
+
+@dataclass(frozen=True)
+class StandaloneBlock:
+    role: Literal["notice", "error"]
+    content: str
+
+
+HistoryBlock = ConversationTurnBlock | StandaloneBlock
+
+
+@dataclass(frozen=True)
+class HistoryLine:
+    role: HistoryRole
+    text: str
 
 
 @dataclass
-class TranscriptEntry:
-    role: Role
-    content: str
+class _PendingToolCall:
+    call_id: str = ""
+    name: str = ""
+    arguments: str = ""
 
 
 class ChatUiState:
     def __init__(self) -> None:
-        self.transcript: list[TranscriptEntry] = []
+        self.blocks: list[HistoryBlock] = []
         self.pending_prompts: list[str] = []
-        self.history_line_roles: list[LineRole] = ["notice"]
         self.history_style_version = 0
         self.status = "Ready"
 
@@ -46,69 +94,139 @@ class ChatUiState:
         self.pending_prompts.append(prompt)
         self.status = self._queue_status()
 
-    def start_turn(self, prompt: str) -> TranscriptEntry:
+    def start_turn(self, prompt: str) -> ConversationTurnBlock:
         self._remove_pending(prompt)
-        self.transcript.append(TranscriptEntry("user", prompt))
-        assistant_entry = TranscriptEntry("assistant", "")
-        self.transcript.append(assistant_entry)
+        turn = ConversationTurnBlock(prompt=prompt, iterations=[])
+        self.blocks.append(turn)
         self.status = "Streaming response"
         self._touch_history()
-        return assistant_entry
+        return turn
 
-    def append_to_response(self, entry: TranscriptEntry, text: str) -> None:
-        if entry not in self.transcript:
-            self.transcript.append(entry)
-        entry.content += text
+    def set_iteration(
+        self,
+        turn: ConversationTurnBlock,
+        index: int,
+        output: IterationOutput,
+    ) -> None:
+        if not any(block is turn for block in self.blocks):
+            return
+        if index < len(turn.iterations):
+            turn.iterations[index] = output
+        elif index == len(turn.iterations):
+            turn.iterations.append(output)
+        else:
+            raise IndexError("iteration updates must be sequential")
+
+        if output.tools:
+            latest = output.tools[-1]
+            self.status = (
+                f"Running tool: {latest.name}"
+                if latest.result is None
+                else "Continuing response"
+            )
+        else:
+            self.status = "Streaming response"
         self._touch_history()
 
-    def finish_response(self) -> None:
+    def finish_turn(self, turn: ConversationTurnBlock) -> None:
+        turn.complete = True
         self.status = self._queue_status()
+        self._touch_history()
 
-    def fail_response(self, entry: TranscriptEntry, message: str) -> None:
-        if entry in self.transcript and not entry.content:
-            self.transcript.remove(entry)
-        self.transcript.append(TranscriptEntry("error", f"request failed: {message}"))
+    def fail_turn(self, turn: ConversationTurnBlock, message: str) -> None:
+        turn.error = f"request failed: {message}"
+        turn.complete = True
         self.status = "Request failed"
         self._touch_history()
 
     def add_notice(self, text: str) -> None:
-        self.transcript.append(TranscriptEntry("notice", text))
+        self.blocks.append(StandaloneBlock("notice", text))
         self._touch_history()
 
     def add_error(self, text: str) -> None:
-        self.transcript.append(TranscriptEntry("error", text))
+        self.blocks.append(StandaloneBlock("error", text))
         self.status = text
         self._touch_history()
 
-    def clear_transcript(self) -> None:
-        self.transcript.clear()
+    def clear_history(self) -> None:
+        self.blocks.clear()
         self._touch_history()
 
     def request_exit(self) -> None:
         self.status = "Exiting after queued responses"
 
-    def render_history(self) -> str:
-        if not self.transcript:
-            self.history_line_roles = ["notice"]
-            return "No messages yet."
+    def history_lines(self) -> list[HistoryLine]:
+        if not self.blocks:
+            return [HistoryLine("notice", "No messages yet.")]
 
-        lines: list[str] = []
-        line_roles: list[LineRole] = []
-        for entry_index, entry in enumerate(self.transcript):
-            if entry_index:
-                lines.append("")
-                line_roles.append("spacer")
+        lines: list[HistoryLine] = []
+        for block_index, block in enumerate(self.blocks):
+            if block_index:
+                lines.append(HistoryLine("spacer", ""))
+            if isinstance(block, ConversationTurnBlock):
+                lines.extend(self._render_turn(block))
+            else:
+                label = "Notice: " if block.role == "notice" else "Error: "
+                lines.extend(self._labeled_lines(label, block.content, block.role))
+        return lines
 
-            entry_lines = entry.content.splitlines() or [""]
-            for line in entry_lines:
-                if entry.role == "user":
-                    lines.append(f" {line} " if line else "  ")
+    def history_text(self) -> str:
+        return "\n".join(line.text for line in self.history_lines())
+
+    def _render_turn(self, turn: ConversationTurnBlock) -> list[HistoryLine]:
+        lines = self._labeled_lines("You: ", turn.prompt, "user")
+        for iteration in turn.iterations:
+            for tool in iteration.tools:
+                lines.extend(
+                    self._labeled_lines(
+                        f"  Tool call [{tool.name}]: ",
+                        tool.arguments,
+                        "tool_call",
+                    )
+                )
+                if tool.result is not None:
+                    label = "Tool error" if tool.failed else "Tool result"
+                    role: HistoryRole = "error" if tool.failed else "tool_result"
+                    lines.extend(
+                        self._labeled_lines(
+                            f"  {label} [{tool.name}]: ",
+                            tool.result,
+                            role,
+                        )
+                    )
+            if iteration.assistant_text:
+                if iteration.tool_requesting:
+                    lines.extend(
+                        self._labeled_lines(
+                            "  Assistant note: ",
+                            iteration.assistant_text,
+                            "assistant_note",
+                        )
+                    )
                 else:
-                    lines.append(line)
-                line_roles.append(entry.role)
+                    lines.extend(
+                        self._labeled_lines(
+                            "Assistant: ",
+                            iteration.assistant_text,
+                            "assistant",
+                        )
+                    )
+        if turn.error is not None:
+            lines.extend(self._labeled_lines("Error: ", turn.error, "error"))
+        return lines
 
-        self.history_line_roles = line_roles
-        return "\n".join(lines)
+    @staticmethod
+    def _labeled_lines(
+        prefix: str,
+        content: str,
+        role: HistoryRole,
+    ) -> list[HistoryLine]:
+        content_lines = content.splitlines() or [""]
+        indentation = " " * len(prefix)
+        return [
+            HistoryLine(role, (prefix if index == 0 else indentation) + line)
+            for index, line in enumerate(content_lines)
+        ]
 
     def render_pending(self) -> str:
         if not self.pending_prompts:
@@ -143,12 +261,16 @@ class ChatReplController:
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         chat: ChatClient | None = None,
         command_handler: SlashCommandHandler | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> None:
         self.config = config
         self.conversation = Conversation(system_prompt=system_prompt)
         self.chat = chat if chat is not None else ChatClient(config)
         self.command_handler = (
             command_handler if command_handler is not None else SlashCommandHandler()
+        )
+        self.tool_registry = (
+            tool_registry if tool_registry is not None else load_builtin_tools()
         )
         self.state = ChatUiState()
         self.queue: asyncio.Queue[WorkItem | None] = asyncio.Queue()
@@ -171,9 +293,8 @@ class ChatReplController:
             self._handle_command(text)
             return
 
-        self.conversation.add_user(user_input)
         self.state.add_pending(user_input)
-        self.queue.put_nowait(WorkItem(user_input, list(self.conversation.messages)))
+        self.queue.put_nowait(WorkItem(user_input))
         self.request_redraw()
 
     def request_exit(self) -> None:
@@ -196,28 +317,143 @@ class ChatReplController:
                 self.queue.task_done()
 
     async def _stream_response(self, item: WorkItem) -> None:
-        response_entry = self.state.start_turn(item.prompt)
+        turn = self.state.start_turn(item.prompt)
         self.request_redraw()
 
-        chunks: list[str] = []
+        self.conversation.add_user(item.prompt)
+        messages = self.conversation.messages
         try:
-            async for piece in self.chat.stream(item.messages):
-                chunks.append(piece)
-                self.state.append_to_response(response_entry, piece)
-                self.request_redraw()
+            for iteration_index in range(MAX_TOOL_ITERATIONS):
+                iteration = IterationOutput()
+                pending_calls: dict[int, _PendingToolCall] = {}
+                async for event in self.chat.stream_response(
+                    messages,
+                    tools=self.tool_registry.definitions(),
+                ):
+                    if event.type == "text_delta":
+                        iteration = replace(
+                            iteration,
+                            assistant_text=iteration.assistant_text + event.text,
+                        )
+                        self.state.set_iteration(
+                            turn,
+                            iteration_index,
+                            iteration,
+                        )
+                        self.request_redraw()
+                        continue
+
+                    if event.index is None:
+                        raise RuntimeError("tool-call delta is missing its index")
+                    if not iteration.tool_requesting:
+                        iteration = replace(iteration, tool_requesting=True)
+                        self.state.set_iteration(
+                            turn,
+                            iteration_index,
+                            iteration,
+                        )
+                        self.request_redraw()
+                    pending = pending_calls.setdefault(
+                        event.index, _PendingToolCall()
+                    )
+                    pending.call_id += event.call_id
+                    pending.name += event.name
+                    pending.arguments += event.arguments
+
+                tool_calls = tuple(
+                    ToolCall(
+                        id=pending.call_id,
+                        name=pending.name,
+                        arguments=pending.arguments,
+                    )
+                    for _, pending in sorted(pending_calls.items())
+                )
+                if not tool_calls:
+                    self.state.set_iteration(
+                        turn,
+                        iteration_index,
+                        iteration,
+                    )
+                    self.conversation.add_assistant(iteration.assistant_text)
+                    self.state.finish_turn(turn)
+                    self.request_redraw()
+                    return
+
+                assistant_content = iteration.assistant_text or None
+                messages.append(
+                    Message(
+                        "assistant",
+                        assistant_content,
+                        tool_calls=tool_calls,
+                    )
+                )
+                for tool_call in tool_calls:
+                    exchange = ToolExchange(
+                        name=tool_call.name,
+                        arguments=tool_call.arguments,
+                    )
+                    iteration = replace(
+                        iteration,
+                        tools=(*iteration.tools, exchange),
+                    )
+                    self.state.set_iteration(
+                        turn,
+                        iteration_index,
+                        iteration,
+                    )
+                    self.request_redraw()
+                    await asyncio.sleep(0)
+
+                    result, failed = self._execute_tool_call(tool_call)
+                    messages.append(
+                        Message(
+                            "tool",
+                            result,
+                            tool_call_id=tool_call.id,
+                        )
+                    )
+                    completed_exchange = replace(
+                        exchange,
+                        result=result,
+                        failed=failed,
+                    )
+                    iteration = replace(
+                        iteration,
+                        tools=(
+                            *iteration.tools[:-1],
+                            completed_exchange,
+                        ),
+                    )
+                    self.state.set_iteration(
+                        turn,
+                        iteration_index,
+                        iteration,
+                    )
+                    self.request_redraw()
+            raise RuntimeError(
+                f"tool iteration limit reached ({MAX_TOOL_ITERATIONS})"
+            )
         except Exception as exc:
-            self.state.fail_response(response_entry, str(exc))
+            self.state.fail_turn(
+                turn,
+                str(exc) or type(exc).__name__,
+            )
             self.request_redraw()
             return
 
-        self.conversation.add_assistant("".join(chunks))
-        self.state.finish_response()
-        self.request_redraw()
+    def _execute_tool_call(self, tool_call: ToolCall) -> tuple[str, bool]:
+        try:
+            arguments = json.loads(tool_call.arguments)
+            if not isinstance(arguments, dict):
+                raise ValueError("arguments must decode to a JSON object")
+            return self.tool_registry.execute(tool_call.name, arguments), False
+        except (json.JSONDecodeError, ValueError, ToolError) as exc:
+            return f"error: {exc}", True
 
     def _handle_command(self, text: str) -> None:
         command_name = text.split(maxsplit=1)[0]
         if command_name == "/clear":
-            self.state.clear_transcript()
+            self.state.clear_history()
 
         command_result = self.command_handler.handle(
             text,

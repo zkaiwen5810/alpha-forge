@@ -31,35 +31,79 @@ class FakeModels:
         return self.response
 
 
-class FakeAsyncChunkStream:
-    """Async iterator of synthetic chat-completion chunks."""
-
-    def __init__(self, pieces: list[str]) -> None:
-        self._pieces = pieces
-        self._index = 0
-
-    def __aiter__(self) -> "FakeAsyncChunkStream":
-        return self
-
-    async def __anext__(self) -> SimpleNamespace:
-        if self._index >= len(self._pieces):
-            raise StopAsyncIteration
-        piece = self._pieces[self._index]
-        self._index += 1
-        delta = SimpleNamespace(content=piece) if piece else SimpleNamespace(content=None)
-        return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
-
-
-class FakeAsyncCompletions:
+class FakeToolAsyncCompletions:
     def __init__(self) -> None:
         self.request = None
 
     async def create(self, **kwargs):
         self.request = kwargs
-        return FakeAsyncChunkStream(["Hel", "lo, ", "world"])
+        chunks = [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content="Working",
+                            tool_calls=[],
+                        )
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id="call-1",
+                                    function=SimpleNamespace(
+                                        name="calculator",
+                                        arguments='{"expression":',
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id=None,
+                                    function=SimpleNamespace(
+                                        name=None,
+                                        arguments='"2+2"}',
+                                    ),
+                                )
+                            ],
+                        )
+                    )
+                ]
+            ),
+        ]
+
+        async def _stream():  # type: ignore[no-untyped-def]
+            for chunk in chunks:
+                yield chunk
+
+        return _stream()
 
 
 class ChatClientTests(unittest.TestCase):
+    def test_client_kwargs_include_configured_timeout(self) -> None:
+        config = Config(api_key="sk-test", timeout=12.5)
+
+        self.assertEqual(
+            ChatClient._client_kwargs(config),
+            {"api_key": "sk-test", "timeout": 12.5},
+        )
+
     def test_sends_chat_completions_request_with_explicit_history(self) -> None:
         completions = FakeCompletions()
         openai_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -92,26 +136,33 @@ class ChatClientTests(unittest.TestCase):
 
         self.assertEqual(client.list_models(), ["model-a", "model-b"])
 
-    def test_stream_yields_delta_content_in_order_and_requests_stream(self) -> None:
-        completions = FakeAsyncCompletions()
+    def test_stream_response_yields_fragmented_tool_call_deltas(self) -> None:
+        completions = FakeToolAsyncCompletions()
         async_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         config = Config(api_key="sk-test", model="gpt-test")
         client = ChatClient(config, async_client=async_client)
-        conversation = Conversation(system_prompt="system")
-        conversation.add_user("hello")
+        conversation = Conversation()
+        conversation.add_user("calculate")
+        tools = [{"type": "function", "function": {"name": "calculator"}}]
 
-        async def _collect() -> list[str]:
-            return [chunk async for chunk in client.stream(conversation.messages)]
+        async def _collect():  # type: ignore[no-untyped-def]
+            return [
+                event
+                async for event in client.stream_response(
+                    conversation.messages,
+                    tools=tools,
+                )
+            ]
 
-        pieces = asyncio.run(_collect())
+        events = asyncio.run(_collect())
 
-        self.assertEqual(pieces, ["Hel", "lo, ", "world"])
-        self.assertEqual(completions.request["model"], "gpt-test")
-        self.assertTrue(completions.request["stream"])
         self.assertEqual(
-            completions.request["messages"],
-            [
-                {"role": "system", "content": "system"},
-                {"role": "user", "content": "hello"},
-            ],
+            [event.type for event in events],
+            ["text_delta", "tool_call_delta", "tool_call_delta"],
         )
+        self.assertEqual(events[0].text, "Working")
+        self.assertEqual(events[1].call_id, "call-1")
+        self.assertEqual(events[1].name, "calculator")
+        self.assertEqual(events[2].arguments, '"2+2"}')
+        self.assertEqual(completions.request["tools"], tools)
+        self.assertTrue(completions.request["stream"])

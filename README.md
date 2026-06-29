@@ -32,6 +32,65 @@ Design intent:
 - LiteLLM is part of the local and deployment architecture when a gateway is useful.
 - Non-OpenAI providers must remain opt-in and should be introduced through generic OpenAI-compatible settings, not provider-specific defaults in app code.
 
+### Tool calling
+
+Tool definitions and execution are isolated in `alpha_forge.tools`. The package
+provides:
+
+- `Tool` metadata, including canonical name, aliases, human description,
+  model prompt, JSON input schema, implementation function, and reserved
+  `is_mcp` and `validate_input` extension points.
+- `ToolRegistry` registration, lookup, OpenAI schema generation, and dispatch.
+- `load_builtin_tools()` for loading the tools shipped with Alpha Forge.
+
+The default registry includes a safe `calculator` tool for arithmetic
+expressions. The chat session sends registered tool definitions through the
+OpenAI Chat Completions API, records calls and results in the in-flight model
+context and visible transcript, and continues the same user turn until the
+model produces a response without tool calls. Completed cross-turn history
+retains the user prompt and final assistant response. A turn stops with an
+error after 10 model iterations to prevent runaway tool loops.
+
+To build a controller with a custom registry:
+
+```python
+from alpha_forge.session import ChatReplController
+from alpha_forge.tools import Tool, ToolRegistry
+
+registry = ToolRegistry([
+    Tool(
+        name="greet",
+        aliases=("hello",),
+        description="Returns a greeting for a person.",
+        prompt="Use this to create a greeting for a named person.",
+        input_schema={
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        function=lambda arguments: f"Hello, {arguments['name']}!",
+    )
+])
+controller = ChatReplController(config, tool_registry=registry)
+```
+
+`is_mcp` and `validate_input` are definition-only in this release; MCP
+execution and custom validator invocation are intentionally deferred.
+
+### Conversation history
+
+The history panel groups each user turn into one block. Model iterations are
+stored as bundled snapshots so streaming text, tool calls, tool results, and
+intermediate assistant notes share one rendering path.
+
+Within a turn, tool calls and results are indented and rendered without blank
+lines. Calls appear atomically before execution, results appear atomically
+after execution, and model text continues streaming whenever available. Text
+from a tool-requesting iteration is retained beneath its tool result as an
+italic cyan `Assistant note`. Separate turns and command notices have one blank
+line between their blocks.
+
 ## Local secrets
 
 Store devcontainer startup secrets in host-side env files under `.devcontainer/`. Docker Compose injects each file into the service that needs it.
@@ -50,6 +109,7 @@ Store devcontainer startup secrets in host-side env files under `.devcontainer/`
 OPENAI_API_KEY=sk-your-local-litellm-master-key
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_BASE_URL=http://litellm:4000/v1
+OPENAI_TIMEOUT=30
 ```
 
 `litellm.env` example:
@@ -88,9 +148,9 @@ Env file changes are runtime configuration. Restart or reopen the devcontainer t
 
 The CLI resolves configuration from three layers, highest priority first:
 
-1. **CLI flags** — `--model`, `--base-url`, and `--init-config` (one-shot).
+1. **CLI flags** — `--model`, `--base-url`, `--timeout`, and `--init-config` (one-shot).
 2. **User config file** — a TOML file at the XDG path `~/.config/alpha-forge/config.toml` (honors `$XDG_CONFIG_HOME`).
-3. **Environment variables** — `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`. A repo-root `.env` file is also loaded.
+3. **Environment variables** — `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL`, `OPENAI_TIMEOUT`. A repo-root `.env` file is also loaded.
 
 If no layer provides an `api_key`, the CLI exits with a hint pointing at the user config file. Run `alpha-forge --init-config` to write a commented template you can edit.
 
@@ -110,6 +170,7 @@ Format — one `[openai]` table, only the keys you need:
 api_key = "sk-..."
 model = "gpt-4.1-mini"
 base_url = "https://api.openai.com/v1"
+timeout = 30
 ```
 
 Unknown top-level keys are ignored for forward compatibility. A malformed file is a hard error — the CLI will not silently fall through to env vars. API keys are never accepted on the command line; use the file or an env var.
@@ -119,10 +180,12 @@ Unknown top-level keys are ignored for forward compatibility. A malformed file i
 ```sh
 alpha-forge --model gpt-4o
 alpha-forge --base-url http://localhost:4000/v1
+alpha-forge --timeout 60
 alpha-forge --init-config
 ```
 
-The CLI flags override the user file, which overrides env vars. The built-in default for `model` is `gpt-4.1-mini`.
+The CLI flags override the user file, which overrides env vars. The built-in
+defaults are `gpt-4.1-mini` for `model` and 30 seconds for `timeout`.
 
 ### Environment variables
 
@@ -132,6 +195,7 @@ The env var layer is the lowest-priority source. It is also the easiest way to s
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4.1-mini
 OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_TIMEOUT=30
 ```
 
 `.env` files in the working directory are loaded via `python-dotenv` (existing var values are not overridden).

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from alpha_forge.config import (
     DEFAULT_MODEL,
+    DEFAULT_TIMEOUT,
     Config,
     ConfigError,
     ConfigSource,
@@ -37,6 +38,7 @@ class ConfigTests(unittest.TestCase):
             "OPENAI_API_KEY": "sk-test",
             "OPENAI_MODEL": "gpt-test",
             "OPENAI_BASE_URL": "http://localhost:4000/v1",
+            "OPENAI_TIMEOUT": "45.5",
         }
         with patch.dict(os.environ, env, clear=True):
             config = Config.from_layers(ConfigSource(), load_env_config())
@@ -44,6 +46,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.api_key, "sk-test")
         self.assertEqual(config.model, "gpt-test")
         self.assertEqual(config.base_url, "http://localhost:4000/v1")
+        self.assertEqual(config.timeout, 45.5)
 
     def test_default_model(self) -> None:
         with patch.dict(
@@ -53,6 +56,7 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.model, DEFAULT_MODEL)
         self.assertIsNone(config.base_url)
+        self.assertEqual(config.timeout, DEFAULT_TIMEOUT)
 
     # --- load_user_config ---
 
@@ -76,6 +80,7 @@ class ConfigTests(unittest.TestCase):
                 'api_key = "file-key"\n'
                 'model = "file-model"\n'
                 'base_url = "https://file.example/v1"\n'
+                'timeout = 42.5\n'
             )
             result = load_user_config(path)
         self.assertEqual(
@@ -84,6 +89,7 @@ class ConfigTests(unittest.TestCase):
                 api_key="file-key",
                 model="file-model",
                 base_url="https://file.example/v1",
+                timeout=42.5,
             ),
         )
 
@@ -121,6 +127,16 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ConfigError) as ctx:
                 load_user_config(path)
         self.assertIn("must be a string", str(ctx.exception))
+
+    def test_load_user_config_rejects_invalid_timeout(self) -> None:
+        for value in ('"slow"', "0", "-1"):
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "config.toml"
+                    path.write_text(f"[openai]\ntimeout = {value}\n")
+                    with self.assertRaises(ConfigError) as ctx:
+                        load_user_config(path)
+                self.assertIn("timeout", str(ctx.exception))
 
     def test_load_user_config_top_level_not_table_raises(self) -> None:
         # Note: Python 3.14's tomllib is strict enough that non-table
@@ -164,17 +180,28 @@ class ConfigTests(unittest.TestCase):
     # --- resolve_config (priority matrix) ---
 
     def test_resolve_config_cli_overrides_user_overrides_env(self) -> None:
-        cli = ConfigSource(model="cli-model", base_url="https://cli/v1")
+        cli = ConfigSource(
+            model="cli-model",
+            base_url="https://cli/v1",
+            timeout=10,
+        )
         user = ConfigSource(
-            api_key="user-key", model="user-model", base_url="https://user/v1"
+            api_key="user-key",
+            model="user-model",
+            base_url="https://user/v1",
+            timeout=20,
         )
         env = ConfigSource(
-            api_key="env-key", model="env-model", base_url="https://env/v1"
+            api_key="env-key",
+            model="env-model",
+            base_url="https://env/v1",
+            timeout=30,
         )
         config = Config.from_layers(cli, user, env)
         self.assertEqual(config.api_key, "user-key")  # user beats env
         self.assertEqual(config.model, "cli-model")  # cli beats user
         self.assertEqual(config.base_url, "https://cli/v1")  # cli beats user
+        self.assertEqual(config.timeout, 10)  # cli beats user
 
     def test_resolve_config_user_overrides_env(self) -> None:
         user = ConfigSource(api_key="sk", model="user-model")
@@ -195,6 +222,7 @@ class ConfigTests(unittest.TestCase):
     def test_resolve_config_fills_default_model(self) -> None:
         config = Config.from_layers(ConfigSource(api_key="sk"))
         self.assertEqual(config.model, DEFAULT_MODEL)
+        self.assertEqual(config.timeout, DEFAULT_TIMEOUT)
 
     # --- load_env_config ---
 
@@ -204,6 +232,16 @@ class ConfigTests(unittest.TestCase):
         ):
             result = load_env_config()
         self.assertIsNone(result.base_url)
+
+    def test_load_env_config_rejects_invalid_timeout(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"OPENAI_TIMEOUT": "not-a-number"},
+            clear=True,
+        ):
+            with self.assertRaises(ConfigError) as ctx:
+                load_env_config()
+        self.assertIn("OPENAI_TIMEOUT", str(ctx.exception))
 
     def test_load_env_config_does_not_call_load_dotenv(self) -> None:
         # Regression guard: load_dotenv must be called by build_config
@@ -221,15 +259,17 @@ class ConfigTests(unittest.TestCase):
             xdg.mkdir()
             (xdg / "alpha-forge").mkdir(parents=True)
             (xdg / "alpha-forge" / "config.toml").write_text(
-                '[openai]\napi_key = "file-key"\nmodel = "file-model"\n'
+                '[openai]\napi_key = "file-key"\n'
+                'model = "file-model"\ntimeout = 20\n'
             )
-            args = _ns(model="cli-model")
+            args = _ns(model="cli-model", timeout=10)
             with patch.dict(
                 os.environ,
                 {
                     "XDG_CONFIG_HOME": str(xdg),
                     "OPENAI_API_KEY": "env-key",
                     "OPENAI_MODEL": "env-model",
+                    "OPENAI_TIMEOUT": "30",
                 },
                 clear=True,
             ):
@@ -239,6 +279,7 @@ class ConfigTests(unittest.TestCase):
         # CLI > user > env precedence.
         self.assertEqual(config.api_key, "file-key")  # user > env
         self.assertEqual(config.model, "cli-model")  # cli > user
+        self.assertEqual(config.timeout, 10)  # cli > user
 
     def test_build_config_calls_load_dotenv(self) -> None:
         args = _ns()

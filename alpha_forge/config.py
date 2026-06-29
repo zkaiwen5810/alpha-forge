@@ -12,6 +12,7 @@ the user config file, env vars, CLI args, and the layered merge.
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 import tomllib
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 
 
 DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_TIMEOUT = 30.0
 
 
 class ConfigError(Exception):
@@ -51,6 +53,7 @@ class ConfigSource:
     api_key: str | None = None
     model: str | None = None
     base_url: str | None = None
+    timeout: float | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,7 @@ class Config:
     api_key: str
     model: str = DEFAULT_MODEL
     base_url: str | None = None
+    timeout: float = DEFAULT_TIMEOUT
 
     @classmethod
     def from_layers(cls, *sources: ConfigSource) -> "Config":
@@ -147,10 +151,22 @@ def load_user_config(path: Path) -> ConfigSource:
             )
         return value
 
+    def _number(key: str) -> float | None:
+        if key not in section:
+            return None
+        value = section[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(
+                f"[openai].{key} in {path} must be a number, "
+                f"got {type(value).__name__}"
+            )
+        return _positive_timeout(value, f"[openai].{key} in {path}")
+
     return ConfigSource(
         api_key=_str("api_key"),
         model=_str("model"),
         base_url=_str("base_url"),
+        timeout=_number("timeout"),
     )
 
 
@@ -169,6 +185,11 @@ def load_env_config() -> ConfigSource:
         api_key=_opt("OPENAI_API_KEY"),
         model=_opt("OPENAI_MODEL"),
         base_url=_opt("OPENAI_BASE_URL"),
+        timeout=(
+            _positive_timeout(value, "OPENAI_TIMEOUT")
+            if (value := _opt("OPENAI_TIMEOUT")) is not None
+            else None
+        ),
     )
 
 
@@ -182,6 +203,11 @@ def load_cli_config(args: "Namespace") -> ConfigSource:
     return ConfigSource(
         model=getattr(args, "model", None),
         base_url=getattr(args, "base_url", None),
+        timeout=(
+            _positive_timeout(value, "--timeout")
+            if (value := getattr(args, "timeout", None)) is not None
+            else None
+        ),
         # api_key intentionally absent — never on the CLI.
     )
 
@@ -195,6 +221,7 @@ def resolve_config(*sources: ConfigSource) -> Config:
     api_key: str | None = None
     model: str | None = None
     base_url: str | None = None
+    timeout: float | None = None
     for source in sources:
         if api_key is None:
             api_key = source.api_key
@@ -202,6 +229,8 @@ def resolve_config(*sources: ConfigSource) -> Config:
             model = source.model
         if base_url is None:
             base_url = source.base_url
+        if timeout is None:
+            timeout = source.timeout
     if api_key is None:
         raise ConfigError(
             "no api_key found: run `alpha-forge --init-config` to create "
@@ -212,7 +241,22 @@ def resolve_config(*sources: ConfigSource) -> Config:
         api_key=api_key,
         model=model if model is not None else DEFAULT_MODEL,
         base_url=base_url,
+        timeout=(
+            _positive_timeout(timeout, "timeout")
+            if timeout is not None
+            else DEFAULT_TIMEOUT
+        ),
     )
+
+
+def _positive_timeout(value: object, source: str) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{source} must be a number of seconds") from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ConfigError(f"{source} must be greater than zero")
+    return timeout
 
 
 # --- init-config side effect -------------------------------------------------
@@ -225,6 +269,7 @@ _CONFIG_TEMPLATE = """# alpha-forge user config (TOML)
 # api_key = "sk-..."
 # model = "gpt-4.1-mini"
 # base_url = "https://api.openai.com/v1"
+# timeout = 30
 """
 
 

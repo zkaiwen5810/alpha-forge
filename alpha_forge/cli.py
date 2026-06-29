@@ -30,6 +30,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override OPENAI_BASE_URL for this run",
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Request timeout in seconds (default: 30)",
+    )
+    parser.add_argument(
         "--init-config",
         action="store_true",
         help=(

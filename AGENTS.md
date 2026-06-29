@@ -33,3 +33,7 @@ When adding a new configurable knob to the CLI, follow this three-step process s
 ### Non-features
 
 - `ALPHA_FORGE_CONFIG` env var as a path override for the user config file is intentionally not implemented. Tests use `$XDG_CONFIG_HOME`; users who want a non-XDG location can symlink.
+
+## Stage
+
+- This project is currently NOT exposed to public, ignore compatibility while updating code.

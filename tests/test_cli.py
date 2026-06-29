@@ -14,9 +14,10 @@ from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
 
+from alpha_forge.chat import ChatStreamEvent
 from alpha_forge.cli import build_parser, main
 from alpha_forge.config import Config
-from alpha_forge.session import ChatReplController
+from alpha_forge.session import ChatReplController, IterationOutput
 from alpha_forge.slash_commands import SlashCommandCompleter
 from alpha_forge.terminal_ui import TerminalChatUi
 
@@ -55,9 +56,9 @@ class CliTests(unittest.TestCase):
 
     def test_prompt_submits_on_enter(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -88,9 +89,9 @@ class CliTests(unittest.TestCase):
 
     def test_slash_suggestions_render_in_prompt_subpanel(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -112,9 +113,9 @@ class CliTests(unittest.TestCase):
 
     def test_mouse_support_defaults_to_history_scroll_mode(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -133,9 +134,9 @@ class CliTests(unittest.TestCase):
 
     def test_mouse_mode_can_be_toggled_for_terminal_selection(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -155,9 +156,9 @@ class CliTests(unittest.TestCase):
 
     def test_copy_history_writes_osc52_clipboard_sequence(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -178,16 +179,16 @@ class CliTests(unittest.TestCase):
             output.flush = lambda: flushes.append(True)  # type: ignore[method-assign]
             ui._copy_history_to_terminal_clipboard()
 
-        expected_payload = base64.b64encode(b"copy me").decode()
+        expected_payload = base64.b64encode(b"Notice: copy me").decode()
         self.assertEqual(writes, [f"\x1b]52;c;{expected_payload}\a"])
         self.assertEqual(flushes, [True])
         self.assertIn("conversation copied", ui._status_text())
 
     def test_history_control_exposes_complete_scrollable_content(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -208,14 +209,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(ui._history_view_height, 5)
         self.assertEqual(ui._history_scroll_offset, 25)
         self.assertEqual(content.cursor_position.y, 25)
-        self.assertEqual(content.get_line(0), [("class:notice-message", "line 0")])
-        self.assertEqual(content.get_line(29), [("class:notice-message", "line 29")])
+        self.assertEqual(
+            content.get_line(0),
+            [("class:notice-message", "Notice: line 0")],
+        )
+        self.assertEqual(
+            content.get_line(29),
+            [("class:notice-message", "        line 29")],
+        )
 
     def test_mouse_wheel_scroll_routes_to_history_viewport(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -240,9 +247,9 @@ class CliTests(unittest.TestCase):
 
     def test_mouse_wheel_over_prompt_scrolls_history(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -271,9 +278,9 @@ class CliTests(unittest.TestCase):
 
     def test_mouse_wheel_over_history_scrolls_history(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -302,9 +309,9 @@ class CliTests(unittest.TestCase):
 
     def test_history_scroll_normalizes_tail_sentinel_before_wheel_delta(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -326,9 +333,9 @@ class CliTests(unittest.TestCase):
 
     def test_slash_suggestions_are_below_prompt_input(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -346,9 +353,9 @@ class CliTests(unittest.TestCase):
 
     def test_enter_autocompletes_partial_slash_command(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -370,9 +377,9 @@ class CliTests(unittest.TestCase):
 
     def test_tab_uses_slash_autocomplete(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -393,9 +400,9 @@ class CliTests(unittest.TestCase):
 
     def test_history_refresh_preserves_scrolled_position(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -422,9 +429,9 @@ class CliTests(unittest.TestCase):
 
     def test_pageup_scrolls_history_without_focusing_history(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -450,9 +457,9 @@ class CliTests(unittest.TestCase):
 
     def test_slash_suggestions_hide_after_command_argument(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -479,7 +486,7 @@ class CliTests(unittest.TestCase):
                 self.responses: dict[str, str] = {}
                 self.started = asyncio.Event()
 
-            async def stream(self, messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, messages, *, tools):  # type: ignore[no-untyped-def]
                 last_user = next(
                     message.content
                     for message in reversed(messages)
@@ -489,7 +496,7 @@ class CliTests(unittest.TestCase):
                 self.started.set()
                 for token in list(self.responses[last_user]):
                     await asyncio.sleep(0)
-                    yield token
+                    yield ChatStreamEvent(type="text_delta", text=token)
 
             def list_models(self) -> list[str]:
                 return []
@@ -513,24 +520,27 @@ class CliTests(unittest.TestCase):
         controller = asyncio.run(scenario())
 
         self.assertEqual(controller.state.pending_prompts, [])
-        self.assertIn("reply-to:hello", controller.state.render_history())
-        self.assertIn("reply-to:second", controller.state.render_history())
-        self.assertNotIn("You:", controller.state.render_history())
-        self.assertNotIn("Alpha:", controller.state.render_history())
+        self.assertIn("reply-to:hello", controller.state.history_text())
+        self.assertIn("reply-to:second", controller.state.history_text())
+        self.assertIn("You: hello", controller.state.history_text())
+        self.assertNotIn("Alpha:", controller.state.history_text())
 
     def test_user_messages_use_distinct_history_style(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
 
         controller = self._controller(FakeChatClient())
-        entry = controller.state.start_turn("hello")
-        controller.state.append_to_response(entry, "reply")
-        controller.state.render_history()
+        turn = controller.state.start_turn("hello")
+        controller.state.set_iteration(
+            turn,
+            0,
+            IterationOutput(assistant_text="reply"),
+        )
 
         with create_pipe_input() as pipe_input:
             ui = TerminalChatUi(
@@ -540,16 +550,34 @@ class CliTests(unittest.TestCase):
             )
             fragments = ui._history_fragments()
 
-        self.assertEqual(fragments[0], ("class:user-message", " hello "))
+        self.assertEqual(fragments[0], ("class:user-message", "You: hello"))
+        self.assertEqual(
+            fragments[2],
+            ("class:assistant-message", "Assistant: reply"),
+        )
+        assistant_attrs = TerminalChatUi._style().get_attrs_for_style_str(
+            "class:assistant-message"
+        )
+        self.assertEqual(assistant_attrs.color, "")
+
+    def test_assistant_notes_use_distinct_italic_cyan_style(self) -> None:
+        self.assertEqual(
+            TerminalChatUi._history_line_style("assistant_note"),
+            "class:assistant-note-message",
+        )
+        style = TerminalChatUi._style()
+        attrs = style.get_attrs_for_style_str("class:assistant-note-message")
+        self.assertTrue(attrs.italic)
+        self.assertEqual(attrs.color, "5fd7ff")
 
     def test_failed_response_is_rendered_in_history(self) -> None:
         import asyncio
 
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 raise RuntimeError("boom")
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return []
@@ -565,7 +593,7 @@ class CliTests(unittest.TestCase):
         controller = asyncio.run(scenario())
 
         self.assertEqual(controller.state.pending_prompts, [])
-        self.assertIn("request failed: boom", controller.state.render_history())
+        self.assertIn("request failed: boom", controller.state.history_text())
 
     def test_parser_does_not_expose_system_option(self) -> None:
         help_text = build_parser().format_help()
@@ -595,9 +623,9 @@ class CliTests(unittest.TestCase):
 
     def test_model_command_lists_models_and_marks_current_model(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return ["gpt-other", "gpt-test"]
@@ -607,16 +635,16 @@ class CliTests(unittest.TestCase):
             chat=FakeChatClient(),
         )
         controller.submit("/model")
-        output = controller.state.render_history()
+        output = controller.state.history_text()
 
         self.assertIn("  gpt-other", output)
         self.assertIn("* gpt-test", output)
 
     def test_model_command_marks_provider_prefixed_current_model(self) -> None:
         class FakeChatClient:
-            async def stream(self, _messages):  # type: ignore[no-untyped-def]
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
                 if False:
-                    yield ""
+                    yield ChatStreamEvent(type="text_delta", text="")
 
             def list_models(self) -> list[str]:
                 return ["openai/gpt-4o"]
@@ -626,7 +654,7 @@ class CliTests(unittest.TestCase):
             chat=FakeChatClient(),
         )
         controller.submit("/model")
-        output = controller.state.render_history()
+        output = controller.state.history_text()
 
         self.assertIn("* openai/gpt-4o", output)
 
@@ -761,6 +789,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("api_key", contents)
             self.assertIn("# model", contents)
             self.assertIn("# base_url", contents)
+            self.assertIn("# timeout", contents)
 
     def test_init_config_refuses_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
