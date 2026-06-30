@@ -9,6 +9,7 @@ from alpha_forge.session import (
     ChatUiState,
     ChatReplController,
     IterationOutput,
+    TokenUsage,
     ToolExchange,
     WorkItem,
 )
@@ -52,10 +53,22 @@ class SessionToolLoopTests(unittest.TestCase):
                         index=0,
                         arguments='"2 + 3 * 4"}',
                     ),
+                    ChatStreamEvent(
+                        type="usage",
+                        prompt_tokens=100,
+                        cached_tokens=60,
+                        total_tokens=125,
+                    ),
                 ],
                 [
                     ChatStreamEvent(type="text_delta", text="The answer "),
                     ChatStreamEvent(type="text_delta", text="is 14."),
+                    ChatStreamEvent(
+                        type="usage",
+                        prompt_tokens=200,
+                        cached_tokens=150,
+                        total_tokens=250,
+                    ),
                 ],
             ]
         )
@@ -83,6 +96,19 @@ class SessionToolLoopTests(unittest.TestCase):
         self.assertIn("  Tool result [calculator]: 14", history)
         self.assertIn("  Assistant note: I'll calculate. ", history)
         self.assertIn("Assistant: The answer is 14.", history)
+        self.assertNotIn("60% reused", history)
+        self.assertIn(
+            "Total tokens: 250 | Prompt cache: 75% reused",
+            history,
+        )
+        self.assertTrue(
+            any(
+                snapshot.endswith(
+                    "Total tokens: 125 | Prompt cache: 60% reused"
+                )
+                for snapshot in redraws
+            )
+        )
         self.assertLess(history.index("Tool call"), history.index("Tool result"))
         self.assertLess(
             history.index("Tool result"),
@@ -316,12 +342,24 @@ class BlockHistoryTests(unittest.TestCase):
                     ),
                 ),
                 tool_requesting=True,
+                token_usage=TokenUsage(
+                    prompt_tokens=100,
+                    cached_tokens=72,
+                    total_tokens=120,
+                ),
             ),
         )
         state.set_iteration(
             turn,
             1,
-            IterationOutput(assistant_text="The answer is 4."),
+            IterationOutput(
+                assistant_text="The answer is 4.",
+                token_usage=TokenUsage(
+                    prompt_tokens=100,
+                    cached_tokens=80,
+                    total_tokens=130,
+                ),
+            ),
         )
         state.finish_turn(turn)
         state.add_notice("model changed")
@@ -339,6 +377,7 @@ class BlockHistoryTests(unittest.TestCase):
                 "assistant_note",
                 "assistant_note",
                 "assistant",
+                "token_usage",
                 "spacer",
                 "notice",
             ],
@@ -354,6 +393,7 @@ class BlockHistoryTests(unittest.TestCase):
                     "  Assistant note: checking",
                     "                  carefully",
                     "Assistant: The answer is 4.",
+                    "Total tokens: 130 | Prompt cache: 80% reused",
                     "",
                     "Notice: model changed",
                 ]
@@ -381,3 +421,77 @@ class BlockHistoryTests(unittest.TestCase):
 
         self.assertNotIn("\nAssistant: Let me check", state.history_text())
         self.assertIn("  Assistant note: Let me check", state.history_text())
+
+    def test_token_usage_formats_zero_reuse_without_raw_cache_count(self) -> None:
+        state = ChatUiState()
+        turn = state.start_turn("hello")
+        state.set_iteration(
+            turn,
+            0,
+            IterationOutput(
+                assistant_text="Hi.",
+                token_usage=TokenUsage(
+                    prompt_tokens=48,
+                    cached_tokens=0,
+                    total_tokens=60,
+                ),
+            ),
+        )
+
+        history = state.history_text()
+        self.assertIn(
+            "Total tokens: 60 | Prompt cache: no reuse yet",
+            history,
+        )
+        self.assertNotIn("48", history)
+
+    def test_only_latest_turns_latest_iteration_shows_token_usage(self) -> None:
+        state = ChatUiState()
+        first_turn = state.start_turn("first")
+        state.set_iteration(
+            first_turn,
+            0,
+            IterationOutput(
+                token_usage=TokenUsage(100, 25, 120),
+            ),
+        )
+        second_turn = state.start_turn("second")
+        state.set_iteration(
+            second_turn,
+            0,
+            IterationOutput(
+                token_usage=TokenUsage(100, 50, 130),
+            ),
+        )
+        state.set_iteration(
+            second_turn,
+            1,
+            IterationOutput(
+                token_usage=TokenUsage(100, 75, 140),
+            ),
+        )
+
+        history = state.history_text()
+        self.assertNotIn("25% reused", history)
+        self.assertNotIn("50% reused", history)
+        self.assertEqual(history.count("Total tokens:"), 1)
+        self.assertIn(
+            "Total tokens: 140 | Prompt cache: 75% reused",
+            history,
+        )
+
+    def test_token_usage_shows_total_when_cache_details_are_missing(self) -> None:
+        state = ChatUiState()
+        turn = state.start_turn("hello")
+        state.set_iteration(
+            turn,
+            0,
+            IterationOutput(
+                token_usage=TokenUsage(
+                    prompt_tokens=40,
+                    total_tokens=55,
+                ),
+            ),
+        )
+
+        self.assertTrue(state.history_text().endswith("Total tokens: 55"))

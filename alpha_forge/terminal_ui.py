@@ -265,7 +265,12 @@ class TerminalChatUi:
         fragments: list[list[tuple[str, str]]] = []
         for line in self.controller.state.history_lines():
             style = self._history_line_style(line.role)
-            for wrapped_line in self._wrap_history_line(line.text, width):
+            text = (
+                line.text.rjust(width)
+                if line.role == "token_usage" and len(line.text) <= width
+                else line.text
+            )
+            for wrapped_line in self._wrap_history_line(text, width):
                 fragments.append([(style, wrapped_line)])
         return fragments
 
@@ -289,6 +294,7 @@ class TerminalChatUi:
             "assistant_note": "class:assistant-note-message",
             "tool_call": "class:tool-call-message",
             "tool_result": "class:tool-result-message",
+            "token_usage": "class:token-usage-message",
             "notice": "class:notice-message",
             "error": "class:error-message",
             "spacer": "",
@@ -476,6 +482,7 @@ class TerminalChatUi:
                 "assistant-note-message": "italic #5fd7ff",
                 "tool-call-message": "#5fafff",
                 "tool-result-message": "#5faf87",
+                "token-usage-message": "italic #87af87",
                 "notice-message": "#888888",
                 "error-message": "#ff5f5f",
             }

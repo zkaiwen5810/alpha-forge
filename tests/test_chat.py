@@ -86,6 +86,14 @@ class FakeToolAsyncCompletions:
                     )
                 ]
             ),
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(
+                    prompt_tokens=100,
+                    total_tokens=125,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=75),
+                ),
+            ),
         ]
 
         async def _stream():  # type: ignore[no-untyped-def]
@@ -158,11 +166,92 @@ class ChatClientTests(unittest.TestCase):
 
         self.assertEqual(
             [event.type for event in events],
-            ["text_delta", "tool_call_delta", "tool_call_delta"],
+            ["text_delta", "tool_call_delta", "tool_call_delta", "usage"],
         )
         self.assertEqual(events[0].text, "Working")
         self.assertEqual(events[1].call_id, "call-1")
         self.assertEqual(events[1].name, "calculator")
         self.assertEqual(events[2].arguments, '"2+2"}')
+        self.assertEqual(events[3].prompt_tokens, 100)
+        self.assertEqual(events[3].cached_tokens, 75)
+        self.assertEqual(events[3].total_tokens, 125)
         self.assertEqual(completions.request["tools"], tools)
         self.assertTrue(completions.request["stream"])
+        self.assertEqual(
+            completions.request["stream_options"],
+            {"include_usage": True},
+        )
+
+    def test_stream_response_keeps_total_without_cached_token_details(self) -> None:
+        class UsageWithoutCacheCompletions:
+            async def create(self, **_kwargs):  # type: ignore[no-untyped-def]
+                async def _stream():  # type: ignore[no-untyped-def]
+                    yield SimpleNamespace(
+                        choices=[],
+                        usage=SimpleNamespace(
+                            prompt_tokens=20,
+                            total_tokens=30,
+                            prompt_tokens_details=None,
+                        ),
+                    )
+
+                return _stream()
+
+        async_client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=UsageWithoutCacheCompletions(),
+            )
+        )
+        client = ChatClient(
+            Config(api_key="sk-test"),
+            async_client=async_client,
+        )
+
+        async def _collect():  # type: ignore[no-untyped-def]
+            return [
+                event
+                async for event in client.stream_response([], tools=[])
+            ]
+
+        events = asyncio.run(_collect())
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].prompt_tokens, 20)
+        self.assertIsNone(events[0].cached_tokens)
+        self.assertEqual(events[0].total_tokens, 30)
+
+    def test_stream_response_accepts_gateway_usage_aliases_and_dicts(self) -> None:
+        class CompatibleGatewayCompletions:
+            async def create(self, **_kwargs):  # type: ignore[no-untyped-def]
+                async def _stream():  # type: ignore[no-untyped-def]
+                    yield SimpleNamespace(
+                        choices=[],
+                        usage={
+                            "prompt_tokens": 80,
+                            "prompt_cache_hit_tokens": 40,
+                            "total_tokens": 100,
+                        },
+                    )
+
+                return _stream()
+
+        async_client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=CompatibleGatewayCompletions(),
+            )
+        )
+        client = ChatClient(
+            Config(api_key="sk-test"),
+            async_client=async_client,
+        )
+
+        async def _collect():  # type: ignore[no-untyped-def]
+            return [
+                event
+                async for event in client.stream_response([], tools=[])
+            ]
+
+        events = asyncio.run(_collect())
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].prompt_tokens, 80)
+        self.assertEqual(events[0].cached_tokens, 40)
+        self.assertEqual(events[0].total_tokens, 100)

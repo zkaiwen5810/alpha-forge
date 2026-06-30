@@ -89,7 +89,10 @@ lines. Calls appear atomically before execution, results appear atomically
 after execution, and model text continues streaming whenever available. Text
 from a tool-requesting iteration is retained beneath its tool result as an
 italic cyan `Assistant note`. Separate turns and command notices have one blank
-line between their blocks.
+line between their blocks. When the provider includes token usage, the latest
+model iteration of the latest turn ends with a right-aligned summary such as
+`Total tokens: 1,555 | Prompt cache: 72% reused`. Providers that omit cache
+details still show the total, while raw cached-token counts are not displayed.
 
 ## Local secrets
 

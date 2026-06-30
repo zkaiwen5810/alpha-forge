@@ -17,7 +17,11 @@ from prompt_toolkit.output import DummyOutput
 from alpha_forge.chat import ChatStreamEvent
 from alpha_forge.cli import build_parser, main
 from alpha_forge.config import Config
-from alpha_forge.session import ChatReplController, IterationOutput
+from alpha_forge.session import (
+    ChatReplController,
+    IterationOutput,
+    TokenUsage,
+)
 from alpha_forge.slash_commands import SlashCommandCompleter
 from alpha_forge.terminal_ui import TerminalChatUi
 
@@ -569,6 +573,51 @@ class CliTests(unittest.TestCase):
         attrs = style.get_attrs_for_style_str("class:assistant-note-message")
         self.assertTrue(attrs.italic)
         self.assertEqual(attrs.color, "5fd7ff")
+
+    def test_token_usage_uses_subdued_italic_style(self) -> None:
+        self.assertEqual(
+            TerminalChatUi._history_line_style("token_usage"),
+            "class:token-usage-message",
+        )
+        attrs = TerminalChatUi._style().get_attrs_for_style_str(
+            "class:token-usage-message"
+        )
+        self.assertTrue(attrs.italic)
+        self.assertEqual(attrs.color, "87af87")
+
+    def test_token_usage_is_right_aligned_to_history_width(self) -> None:
+        class FakeChatClient:
+            async def stream_response(self, _messages, *, tools):  # type: ignore[no-untyped-def]
+                if False:
+                    yield ChatStreamEvent(type="text_delta", text="")
+
+            def list_models(self) -> list[str]:
+                return []
+
+        controller = self._controller(FakeChatClient())
+        turn = controller.state.start_turn("hello")
+        controller.state.set_iteration(
+            turn,
+            0,
+            IterationOutput(
+                token_usage=TokenUsage(100, 75, 125),
+            ),
+        )
+
+        with create_pipe_input() as pipe_input:
+            ui = TerminalChatUi(
+                controller,
+                input=pipe_input,
+                output=DummyOutput(),
+            )
+            cache_line = ui._history_line_fragments(60, None)[-1][0][1]
+
+        self.assertEqual(len(cache_line), 60)
+        self.assertTrue(
+            cache_line.endswith(
+                "Total tokens: 125 | Prompt cache: 75% reused"
+            )
+        )
 
     def test_failed_response_is_rendered_in_history(self) -> None:
         import asyncio

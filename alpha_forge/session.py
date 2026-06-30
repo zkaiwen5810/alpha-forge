@@ -25,6 +25,7 @@ HistoryRole = Literal[
     "assistant_note",
     "tool_call",
     "tool_result",
+    "token_usage",
     "notice",
     "error",
     "spacer",
@@ -47,10 +48,18 @@ class ToolExchange:
 
 
 @dataclass(frozen=True)
+class TokenUsage:
+    prompt_tokens: int | None = None
+    cached_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+@dataclass(frozen=True)
 class IterationOutput:
     assistant_text: str = ""
     tools: tuple[ToolExchange, ...] = ()
     tool_requesting: bool = False
+    token_usage: TokenUsage | None = None
 
 
 @dataclass(eq=False)
@@ -159,12 +168,25 @@ class ChatUiState:
         if not self.blocks:
             return [HistoryLine("notice", "No messages yet.")]
 
+        latest_turn = next(
+            (
+                block
+                for block in reversed(self.blocks)
+                if isinstance(block, ConversationTurnBlock)
+            ),
+            None,
+        )
         lines: list[HistoryLine] = []
         for block_index, block in enumerate(self.blocks):
             if block_index:
                 lines.append(HistoryLine("spacer", ""))
             if isinstance(block, ConversationTurnBlock):
-                lines.extend(self._render_turn(block))
+                lines.extend(
+                    self._render_turn(
+                        block,
+                        show_token_usage=block is latest_turn,
+                    )
+                )
             else:
                 label = "Notice: " if block.role == "notice" else "Error: "
                 lines.extend(self._labeled_lines(label, block.content, block.role))
@@ -173,9 +195,14 @@ class ChatUiState:
     def history_text(self) -> str:
         return "\n".join(line.text for line in self.history_lines())
 
-    def _render_turn(self, turn: ConversationTurnBlock) -> list[HistoryLine]:
+    def _render_turn(
+        self,
+        turn: ConversationTurnBlock,
+        *,
+        show_token_usage: bool,
+    ) -> list[HistoryLine]:
         lines = self._labeled_lines("You: ", turn.prompt, "user")
-        for iteration in turn.iterations:
+        for iteration_index, iteration in enumerate(turn.iterations):
             for tool in iteration.tools:
                 lines.extend(
                     self._labeled_lines(
@@ -211,6 +238,17 @@ class ChatUiState:
                             "assistant",
                         )
                     )
+            if (
+                show_token_usage
+                and iteration_index == len(turn.iterations) - 1
+                and iteration.token_usage is not None
+            ):
+                lines.append(
+                    HistoryLine(
+                        "token_usage",
+                        self._format_token_usage(iteration.token_usage),
+                    )
+                )
         if turn.error is not None:
             lines.extend(self._labeled_lines("Error: ", turn.error, "error"))
         return lines
@@ -227,6 +265,24 @@ class ChatUiState:
             HistoryLine(role, (prefix if index == 0 else indentation) + line)
             for index, line in enumerate(content_lines)
         ]
+
+    @staticmethod
+    def _format_token_usage(usage: TokenUsage) -> str:
+        parts: list[str] = []
+        if usage.total_tokens is not None:
+            parts.append(f"Total tokens: {usage.total_tokens:,}")
+        if usage.cached_tokens is not None:
+            if usage.cached_tokens <= 0:
+                cache_text = "no reuse yet"
+            elif usage.prompt_tokens is None or usage.prompt_tokens <= 0:
+                cache_text = "reuse detected"
+            else:
+                percentage = round(
+                    usage.cached_tokens / usage.prompt_tokens * 100
+                )
+                cache_text = f"{min(100, max(0, percentage))}% reused"
+            parts.append(f"Prompt cache: {cache_text}")
+        return " | ".join(parts)
 
     def render_pending(self) -> str:
         if not self.pending_prompts:
@@ -375,7 +431,7 @@ class ChatReplController:
                     iteration,
                     event.text,
                 )
-            else:
+            elif event.type == "tool_call_delta":
                 iteration = self._add_tool_call_delta(
                     turn,
                     iteration_index,
@@ -383,6 +439,20 @@ class ChatReplController:
                     pending_calls,
                     event,
                 )
+            elif (
+                event.prompt_tokens is not None
+                or event.cached_tokens is not None
+                or event.total_tokens is not None
+            ):
+                iteration = replace(
+                    iteration,
+                    token_usage=TokenUsage(
+                        prompt_tokens=event.prompt_tokens,
+                        cached_tokens=event.cached_tokens,
+                        total_tokens=event.total_tokens,
+                    ),
+                )
+                self._publish_iteration(turn, iteration_index, iteration)
 
         return iteration, self._build_tool_calls(pending_calls)
 
