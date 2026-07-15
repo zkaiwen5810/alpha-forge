@@ -3,7 +3,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import alpha_forge.session as session_compat
 from alpha_forge.chat import ChatStreamEvent
 from alpha_forge.config import Config
 from alpha_forge.conversation import AssistantMessage, ToolCall, ToolMessage
@@ -12,7 +11,8 @@ from alpha_forge.repl_controller import (
     ChatReplController,
     WorkItem,
 )
-from alpha_forge.tool_results import ToolResultManager
+from alpha_forge.session import Session
+from alpha_forge.tool_results import RawToolResult, ToolResultManager
 from alpha_forge.tools import Tool, ToolRegistry
 from alpha_forge.ui_state import (
     ChatUiState,
@@ -36,11 +36,84 @@ class ScriptedToolChat:
         return []
 
 
-class SessionCompatibilityTests(unittest.TestCase):
-    def test_session_facade_reexports_split_modules(self) -> None:
-        self.assertIs(session_compat.ChatReplController, ChatReplController)
-        self.assertIs(session_compat.ChatUiState, ChatUiState)
-        self.assertIs(session_compat.IterationOutput, IterationOutput)
+class SessionBoundaryChat:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.requests = []
+
+    async def stream_response(self, messages, *, tools):  # type: ignore[no-untyped-def]
+        request_index = len(self.requests)
+        self.requests.append((list(messages), tools))
+        if request_index == 0:
+            self.started.set()
+            await self.release.wait()
+            yield ChatStreamEvent(
+                type="tool_call_delta",
+                index=0,
+                call_id="call-old",
+                name="large_result",
+                arguments="{}",
+            )
+        elif request_index == 1:
+            yield ChatStreamEvent(type="text_delta", text="old response")
+        else:
+            yield ChatStreamEvent(type="text_delta", text="new response")
+
+    def list_models(self) -> list[str]:
+        return []
+
+
+class SessionTests(unittest.TestCase):
+    def test_session_owns_identity_and_conversation(self) -> None:
+        session = Session(system_prompt="system", session_id="session")
+
+        session.add_user("hello")
+        session.add_assistant("hi")
+
+        self.assertEqual(session.session_id, "session")
+        self.assertEqual(
+            [(message.role, message.content) for message in session.messages],
+            [("system", "system"), ("user", "hello"), ("assistant", "hi")],
+        )
+
+    def test_session_rejects_unsafe_identity(self) -> None:
+        with self.assertRaisesRegex(ValueError, "session ID"):
+            Session(session_id="../escape")
+
+    def test_fresh_session_keeps_prompt_and_result_policy(self) -> None:
+        content = "x" * 1_000
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ToolResultManager(
+                persist_directory=Path(tmp),
+                individual_limit=500,
+                aggregate_limit=800,
+            )
+            session = Session(
+                system_prompt="system",
+                tool_result_manager=manager,
+                session_id="old",
+            )
+            messages = session.record_tool_iteration(
+                None,
+                tool_calls=(ToolCall("call-1", "large", "{}"),),
+                raw_results=(RawToolResult("call-1", content),),
+            )
+
+            fresh = session.fresh()
+
+            assert messages[0].preview is not None
+            self.assertEqual(
+                messages[0].preview.persisted_path.parent.parent.name,
+                "old",
+            )
+            self.assertTrue(messages[0].preview.persisted_path.exists())
+            self.assertNotEqual(fresh.session_id, "old")
+            self.assertEqual(len(fresh.session_id), 32)
+            self.assertEqual(
+                [(message.role, message.content) for message in fresh.messages],
+                [("system", "system")],
+            )
 
 
 class SessionToolLoopTests(unittest.TestCase):
@@ -51,10 +124,13 @@ class SessionToolLoopTests(unittest.TestCase):
             **kwargs,
         )
 
-    def test_controller_names_ui_state_explicitly(self) -> None:
+    def test_controller_exposes_session_and_ui_state_explicitly(self) -> None:
         controller = self._controller(ScriptedToolChat([]))
 
+        self.assertIsInstance(controller.session, Session)
         self.assertIsInstance(controller.ui_state, ChatUiState)
+        self.assertFalse(hasattr(controller, "conversation"))
+        self.assertFalse(hasattr(controller, "tool_result_manager"))
         self.assertFalse(hasattr(controller, "state"))
 
     def test_tool_call_iterates_until_final_response_and_updates_turn_block(self) -> None:
@@ -278,7 +354,6 @@ class SessionToolLoopTests(unittest.TestCase):
                 persist_directory=Path(tmp),
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="session",
             )
             controller = self._controller(
                 chat,
@@ -336,7 +411,6 @@ class SessionToolLoopTests(unittest.TestCase):
                 persist_directory=blocked,
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="session",
             )
             controller = self._controller(
                 chat,
@@ -350,22 +424,116 @@ class SessionToolLoopTests(unittest.TestCase):
         self.assertFalse(
             any(
                 isinstance(message, AssistantMessage)
-                for message in controller.conversation.messages
+                for message in controller.session.messages
             )
         )
         self.assertIn("request failed: cannot persist", controller.ui_state.history_text())
 
-    def test_clear_rotates_tool_result_session(self) -> None:
-        manager = ToolResultManager(session_id="before")
+    def test_clear_starts_a_fresh_session(self) -> None:
+        manager = ToolResultManager()
         controller = self._controller(
             ScriptedToolChat([]),
             tool_result_manager=manager,
         )
+        before = controller.session
 
         controller.submit("/clear")
 
-        self.assertNotEqual(manager.session_id, "before")
+        self.assertIsNot(controller.session, before)
+        self.assertNotEqual(controller.session.session_id, before.session_id)
+        self.assertEqual(
+            [(message.role, message.content) for message in controller.session.messages],
+            [
+                (
+                    "system",
+                    "You are Alpha Forge, a concise and helpful assistant.",
+                )
+            ],
+        )
         self.assertIn("conversation cleared", controller.ui_state.history_text())
+
+    def test_clear_isolates_active_turn_and_moves_queued_turn_to_new_session(
+        self,
+    ) -> None:
+        full_result = "x" * 1_000
+        tool = Tool(
+            name="large_result",
+            function=lambda _arguments: full_result,
+            description="Return a large result.",
+            prompt="Return a large result.",
+            input_schema={"type": "object"},
+        )
+
+        async def _scenario(root: Path):  # type: ignore[no-untyped-def]
+            chat = SessionBoundaryChat()
+            manager = ToolResultManager(
+                persist_directory=root,
+                individual_limit=500,
+                aggregate_limit=800,
+            )
+            controller = self._controller(
+                chat,
+                tool_registry=ToolRegistry([tool]),
+                tool_result_manager=manager,
+            )
+            consumer = asyncio.create_task(controller.consume())
+            controller.submit("old prompt")
+            controller.submit("queued prompt")
+            await chat.started.wait()
+
+            old_session = controller.session
+            controller.submit("/clear")
+            new_session = controller.session
+            controller.request_exit()
+            chat.release.set()
+            await consumer
+            return controller, chat, old_session, new_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            controller, chat, old_session, new_session = asyncio.run(
+                _scenario(Path(tmp))
+            )
+
+        self.assertIs(controller.session, new_session)
+        self.assertIsNot(old_session, new_session)
+        old_tool_message = next(
+            message
+            for message in old_session.messages
+            if isinstance(message, ToolMessage)
+        )
+        assert old_tool_message.preview is not None
+        self.assertEqual(
+            old_tool_message.preview.persisted_path.parent.parent.name,
+            old_session.session_id,
+        )
+        self.assertEqual(
+            [(message.role, message.content) for message in chat.requests[2][0]],
+            [
+                (
+                    "system",
+                    "You are Alpha Forge, a concise and helpful assistant.",
+                ),
+                ("user", "queued prompt"),
+            ],
+        )
+        self.assertEqual(
+            [(message.role, message.content) for message in new_session.messages],
+            [
+                (
+                    "system",
+                    "You are Alpha Forge, a concise and helpful assistant.",
+                ),
+                ("user", "queued prompt"),
+                ("assistant", "new response"),
+            ],
+        )
+        history = controller.ui_state.history_text()
+        self.assertNotIn("old prompt", history)
+        self.assertNotIn("old response", history)
+        self.assertNotIn("Tool call", history)
+        self.assertIn("conversation cleared", history)
+        self.assertIn("queued prompt", history)
+        self.assertIn("new response", history)
 
     def test_queued_turn_uses_completed_history_from_previous_turn(self) -> None:
         chat = ScriptedToolChat(

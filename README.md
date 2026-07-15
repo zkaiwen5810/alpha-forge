@@ -44,12 +44,12 @@ provides:
 - `load_builtin_tools()` for loading the tools shipped with Alpha Forge.
 
 The default registry includes a safe `calculator` tool for arithmetic
-expressions. The chat session sends registered tool definitions through the
-OpenAI Chat Completions API, records calls and results in the in-flight model
-context and visible transcript, and continues the same user turn until the
-model produces a response without tool calls. Completed cross-turn history
-retains the user prompt and final assistant response. A turn stops with an
-error after 10 model iterations to prevent runaway tool loops.
+expressions. The current `Session` sends registered tool definitions through
+the OpenAI Chat Completions API, records calls and results in its model context,
+and continues the same user turn until the model produces a response without
+tool calls. Completed cross-turn history retains the user prompt and final
+assistant response. A turn stops with an error after 10 model iterations to
+prevent runaway tool loops.
 
 Tool result content is bounded before it is added to the model context. One
 result may contain at most 16,000 Unicode characters, and all results requested
@@ -69,10 +69,12 @@ $XDG_DATA_HOME/alpha-forge/<session-id>/tool-results/<tool-call-id>.{txt,json}
 
 When `XDG_DATA_HOME` is unset, the base directory is
 `~/.local/share/alpha-forge`. Results that parse as JSON use `.json`; all other
-results use `.txt`. `/clear` starts a new storage session but does not delete
-previous files. Persisted results are not automatically restored, exposed as a
-file-reading tool, or cleaned up. The limits and persistence location are
-built-in policy rather than CLI or user-config fields.
+results use `.txt`. `/clear` creates a new `Session` with a new ID but does not
+delete previous files. An active turn finishes against the session in which it
+started, while queued turns that have not started use the new session.
+Persisted results are not automatically restored, exposed as a file-reading
+tool, or cleaned up. The limits and persistence location are built-in policy
+rather than CLI or user-config fields.
 
 To build a controller with a custom registry:
 
@@ -103,10 +105,13 @@ execution and custom validator invocation are intentionally deferred.
 
 ### Conversation history
 
-REPL orchestration lives in `alpha_forge.repl_controller`, while transcript
-view models and rendering logic live in `alpha_forge.ui_state`. The controller
-exposes the latter as `controller.ui_state`. `alpha_forge.session` remains a
-compatibility import facade and contains no orchestration or UI implementation.
+REPL orchestration lives in `alpha_forge.repl_controller`, per-session identity
+and protocol history live in `alpha_forge.session`, and transcript view models
+and rendering logic live in `alpha_forge.ui_state`. The controller exposes the
+current protocol state as `controller.session` and rendering state as
+`controller.ui_state`. A session owns its `Conversation` and coordinates
+tool-result persistence with its ID; the controller owns queueing and replaces
+the session when `/clear` is executed.
 
 The history panel groups each user turn into one block. Model iterations are
 stored as bundled snapshots so streaming text, tool calls, tool results, and

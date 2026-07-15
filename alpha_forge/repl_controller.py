@@ -9,7 +9,8 @@ from dataclasses import dataclass, replace
 
 from alpha_forge.chat import ChatClient, ChatStreamEvent
 from alpha_forge.config import Config
-from alpha_forge.conversation import Conversation, ToolCall
+from alpha_forge.conversation import ToolCall
+from alpha_forge.session import DEFAULT_SYSTEM_PROMPT, Session
 from alpha_forge.slash_commands import SlashCommandHandler
 from alpha_forge.slash_commands.base import CommandContext
 from alpha_forge.tool_results import RawToolResult, ToolResultManager
@@ -22,7 +23,6 @@ from alpha_forge.ui_state import (
     ToolExchange,
 )
 
-DEFAULT_SYSTEM_PROMPT = "You are Alpha Forge, a concise and helpful assistant."
 MAX_TOOL_ITERATIONS = 10
 
 Redraw = Callable[[], None]
@@ -44,7 +44,7 @@ class _PendingToolCall:
 
 
 class ChatReplController:
-    """Coordinate protocol history, background work, tools, and UI snapshots.
+    """Coordinate session lifecycle, background work, tools, and UI snapshots.
 
     The controller owns application flow but not terminal rendering. It writes
     view-ready snapshots to ``ui_state`` and exposes lifecycle callbacks that a
@@ -62,18 +62,16 @@ class ChatReplController:
         tool_result_manager: ToolResultManager | None = None,
     ) -> None:
         self.config = config
-        self.conversation = Conversation(system_prompt=system_prompt)
+        self.session = Session(
+            system_prompt=system_prompt,
+            tool_result_manager=tool_result_manager,
+        )
         self.chat = chat if chat is not None else ChatClient(config)
         self.command_handler = (
             command_handler if command_handler is not None else SlashCommandHandler()
         )
         self.tool_registry = (
             tool_registry if tool_registry is not None else load_builtin_tools()
-        )
-        self.tool_result_manager = (
-            tool_result_manager
-            if tool_result_manager is not None
-            else ToolResultManager()
         )
         self.ui_state = ChatUiState()
 
@@ -125,18 +123,24 @@ class ChatReplController:
                 self.queue.task_done()
 
     async def _stream_response(self, item: WorkItem) -> None:
+        # A turn stays attached to the session in which it starts. If /clear
+        # runs while this coroutine is awaiting provider output, later writes
+        # still go to this captured session rather than the new current one.
+        session = self.session
         turn = self.ui_state.start_turn(item.prompt)
         self.request_redraw()
 
-        self.conversation.add_user(item.prompt)
+        session.add_user(item.prompt)
         try:
             for iteration_index in range(MAX_TOOL_ITERATIONS):
                 iteration, tool_calls = await self._stream_iteration(
+                    session,
                     turn,
                     iteration_index,
                 )
                 if not tool_calls:
                     self._finish_assistant_turn(
+                        session,
                         turn,
                         iteration_index,
                         iteration,
@@ -144,6 +148,7 @@ class ChatReplController:
                     return
 
                 await self._run_tool_calls(
+                    session,
                     turn,
                     iteration_index,
                     iteration,
@@ -161,6 +166,7 @@ class ChatReplController:
 
     async def _stream_iteration(
         self,
+        session: Session,
         turn: ConversationTurnBlock,
         iteration_index: int,
     ) -> tuple[IterationOutput, tuple[ToolCall, ...]]:
@@ -172,7 +178,7 @@ class ChatReplController:
         pending_calls: dict[int, _PendingToolCall] = {}
 
         async for event in self.chat.stream_response(
-            self.conversation.messages,
+            session.messages,
             tools=self.tool_registry.definitions(),
         ):
             if event.type == "text_delta":
@@ -258,6 +264,7 @@ class ChatReplController:
 
     async def _run_tool_calls(
         self,
+        session: Session,
         turn: ConversationTurnBlock,
         iteration_index: int,
         iteration: IterationOutput,
@@ -291,13 +298,11 @@ class ChatReplController:
         # Nothing is committed to protocol history until persistence and
         # preview construction succeed, which prevents a failed write from
         # leaving an assistant tool-call message without matching tool outputs.
-        tool_messages = self.tool_result_manager.process(tuple(raw_results))
-        self.conversation.add_assistant(
+        tool_messages = session.record_tool_iteration(
             iteration.assistant_text or None,
             tool_calls=tool_calls,
+            raw_results=tuple(raw_results),
         )
-        for tool_message in tool_messages:
-            self.conversation.add_tool(tool_message)
 
         # Publish the same ToolMessage objects that were committed above. This
         # keeps model and UI content identical while allowing results to become
@@ -319,12 +324,13 @@ class ChatReplController:
 
     def _finish_assistant_turn(
         self,
+        session: Session,
         turn: ConversationTurnBlock,
         iteration_index: int,
         iteration: IterationOutput,
     ) -> None:
         self._publish_iteration(turn, iteration_index, iteration)
-        self.conversation.add_assistant(iteration.assistant_text)
+        session.add_assistant(iteration.assistant_text)
         self.ui_state.finish_turn(turn)
         self.request_redraw()
 
@@ -348,21 +354,13 @@ class ChatReplController:
 
     def _handle_command(self, text: str) -> None:
         command_name = text.split(maxsplit=1)[0]
-        if command_name == "/clear":
-            self.ui_state.clear_history()
-
-            # Conversation clearing and persistence rotation form one user
-            # boundary: old files remain inspectable, but future previews must
-            # never be written into the cleared conversation's session.
-            self.tool_result_manager.rotate_session()
-
         command_result = self.command_handler.handle(
             text,
             CommandContext(
                 config=self.config,
-                conversation=self.conversation,
                 chat=self.chat,
                 print_text=self._add_notice,
+                start_new_session=self._start_new_session,
             ),
         )
         if command_result.exit_requested:
@@ -374,6 +372,10 @@ class ChatReplController:
 
         self.ui_state.add_error(f"unknown command: {command_name}")
         self.request_redraw()
+
+    def _start_new_session(self) -> None:
+        self.session = self.session.fresh()
+        self.ui_state.clear_history()
 
     def _add_notice(self, text: str) -> None:
         self.ui_state.add_notice(text)

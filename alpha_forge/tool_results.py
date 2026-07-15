@@ -8,7 +8,6 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from uuid import uuid4
 
 from alpha_forge.conversation import (
     PreviewReason,
@@ -19,6 +18,7 @@ from alpha_forge.conversation import (
 MAX_TOOL_RESULT_CHARS = 16_000
 MAX_TOOL_RESULTS_CHARS = 32_000
 _SAFE_CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,120}\Z")
+_SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,120}\Z")
 
 
 class ToolResultBudgetError(RuntimeError):
@@ -46,7 +46,7 @@ def default_persist_directory() -> Path:
 
 
 class ToolResultManager:
-    """Apply result budgets and own the current persistence session."""
+    """Apply result budgets and persist previews for a supplied session."""
 
     def __init__(
         self,
@@ -54,32 +54,28 @@ class ToolResultManager:
         persist_directory: Path | None = None,
         individual_limit: int = MAX_TOOL_RESULT_CHARS,
         aggregate_limit: int = MAX_TOOL_RESULTS_CHARS,
-        session_id: str | None = None,
     ) -> None:
         if individual_limit <= 0:
             raise ValueError("individual tool-result limit must be positive")
         if aggregate_limit <= 0:
             raise ValueError("aggregate tool-result limit must be positive")
-        resolved_session_id = session_id or uuid4().hex
-        if not _SAFE_CALL_ID.fullmatch(resolved_session_id):
-            raise ValueError("session ID must contain only letters, digits, _ or -")
         self.persist_directory = (
             persist_directory or default_persist_directory()
         ).expanduser().resolve()
         self.individual_limit = individual_limit
         self.aggregate_limit = aggregate_limit
-        self.session_id = resolved_session_id
-
-    def rotate_session(self) -> str:
-        """Start a new persistence session without deleting the old one."""
-        self.session_id = uuid4().hex
-        return self.session_id
 
     def process(
         self,
         results: tuple[RawToolResult, ...],
+        *,
+        session_id: str,
     ) -> tuple[ToolMessage, ...]:
         """Return model-facing results bounded individually and in aggregate."""
+        if not _SAFE_SESSION_ID.fullmatch(session_id):
+            raise ValueError(
+                "session ID must contain only letters, digits, _ or -"
+            )
         if not results:
             return ()
 
@@ -123,7 +119,11 @@ class ToolResultManager:
                 desired_length=desired,
                 allocated_length=allocated,
             )
-            path = self._result_path(result.tool_call_id, result.content)
+            path = self._result_path(
+                session_id,
+                result.tool_call_id,
+                result.content,
+            )
             if path in seen_paths:
                 raise ToolResultPersistenceError(
                     f"duplicate persisted tool-result path: {path}"
@@ -226,12 +226,17 @@ class ToolResultManager:
         tail = content[-tail_chars:] if tail_chars else ""
         return prefix + head + middle + suffix + tail
 
-    def _result_path(self, tool_call_id: str, content: str) -> Path:
+    def _result_path(
+        self,
+        session_id: str,
+        tool_call_id: str,
+        content: str,
+    ) -> Path:
         extension = "json" if self._is_json(content) else "txt"
         filename = f"{self._safe_call_id(tool_call_id)}.{extension}"
         return (
             self.persist_directory
-            / self.session_id
+            / session_id
             / "tool-results"
             / filename
         )

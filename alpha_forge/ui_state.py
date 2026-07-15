@@ -76,7 +76,7 @@ class ChatUiState:
 
     This state deliberately does not own protocol conversation history. The
     controller publishes immutable iteration snapshots here, while
-    ``Conversation`` remains the source of truth for messages sent to the LLM.
+    ``Session`` remains the source of truth for messages sent to the LLM.
     """
 
     def __init__(self) -> None:
@@ -128,11 +128,15 @@ class ChatUiState:
         self._touch_history()
 
     def finish_turn(self, turn: ConversationTurnBlock) -> None:
+        if not any(block is turn for block in self.blocks):
+            return
         turn.complete = True
         self.status = self._queue_status()
         self._touch_history()
 
     def fail_turn(self, turn: ConversationTurnBlock, message: str) -> None:
+        if not any(block is turn for block in self.blocks):
+            return
         turn.error = f"request failed: {message}"
         turn.complete = True
         self.status = "Request failed"
@@ -149,6 +153,7 @@ class ChatUiState:
 
     def clear_history(self) -> None:
         self.blocks.clear()
+        self.status = self._queue_status()
         self._touch_history()
 
     def request_exit(self) -> None:

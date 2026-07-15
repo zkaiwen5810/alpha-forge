@@ -10,13 +10,8 @@ def _exit(_context: CommandContext) -> CommandResult:
 
 
 def _clear(context: CommandContext) -> CommandResult:
-    """Clear the conversation.
-
-    If invoked while a generation is in flight, the in-flight response
-    may still be appended to the (now-cleared) conversation when it
-    completes.
-    """
-    context.conversation.clear()
+    """Start a fresh session without interrupting in-flight work."""
+    context.start_new_session()
     context.print_text("conversation cleared")
     return CommandResult(handled=True)
 

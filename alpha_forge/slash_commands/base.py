@@ -7,18 +7,18 @@ from dataclasses import dataclass
 
 from alpha_forge.chat import ChatClient
 from alpha_forge.config import Config
-from alpha_forge.conversation import Conversation
 
 
 Print = Callable[[str], None]
+StartNewSession = Callable[[], None]
 
 
 @dataclass(frozen=True)
 class CommandContext:
     config: Config
-    conversation: Conversation
     chat: ChatClient
     print_text: Print
+    start_new_session: StartNewSession
 
 
 @dataclass(frozen=True)

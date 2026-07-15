@@ -16,7 +16,7 @@ from alpha_forge.tool_results import (
 
 class ToolResultManagerTests(unittest.TestCase):
     def test_default_limits_match_builtin_policy(self) -> None:
-        manager = ToolResultManager(session_id="session")
+        manager = ToolResultManager()
 
         self.assertEqual(manager.individual_limit, 16_000)
         self.assertEqual(manager.aggregate_limit, 32_000)
@@ -28,14 +28,14 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=root,
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="session",
             )
 
             messages = manager.process(
                 (
                     RawToolResult("call-1", "first"),
                     RawToolResult("call-2", "second", failed=True),
-                )
+                ),
+                session_id="session",
             )
 
             self.assertEqual(
@@ -52,11 +52,11 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=Path(tmp),
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="session",
             )
 
             message = manager.process(
-                (RawToolResult("call-1", "x" * 500),)
+                (RawToolResult("call-1", "x" * 500),),
+                session_id="session",
             )[0]
 
             self.assertIsNone(message.preview)
@@ -69,10 +69,12 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=Path(tmp),
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="session",
             )
 
-            message = manager.process((RawToolResult("call-1", content),))[0]
+            message = manager.process(
+                (RawToolResult("call-1", content),),
+                session_id="session",
+            )[0]
 
             self.assertEqual(len(message.content), 500)
             self.assertIn("[alpha-forge tool-result-preview]", message.content)
@@ -99,11 +101,11 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=Path(tmp),
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="session",
             )
 
             message = manager.process(
-                (RawToolResult("call-error", "error: " + ("x" * 1_000), True),)
+                (RawToolResult("call-error", "error: " + ("x" * 1_000), True),),
+                session_id="session",
             )[0]
 
             self.assertTrue(message.failed)
@@ -116,10 +118,12 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=Path(tmp),
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="session",
             )
 
-            message = manager.process((RawToolResult("call-json", content),))[0]
+            message = manager.process(
+                (RawToolResult("call-json", content),),
+                session_id="session",
+            )[0]
 
             assert message.preview is not None
             self.assertEqual(message.preview.persisted_path.suffix, ".json")
@@ -134,7 +138,6 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=Path(tmp),
                 individual_limit=1_000,
                 aggregate_limit=1_100,
-                session_id="session",
             )
 
             messages = manager.process(
@@ -142,7 +145,8 @@ class ToolResultManagerTests(unittest.TestCase):
                     RawToolResult("call-short", short),
                     RawToolResult("call-a", long_one),
                     RawToolResult("call-b", long_two),
-                )
+                ),
+                session_id="session",
             )
 
             self.assertEqual(messages[0].content, short)
@@ -166,14 +170,14 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=Path(tmp),
                 individual_limit=700,
                 aggregate_limit=1_000,
-                session_id="session",
             )
 
             messages = manager.process(
                 (
                     RawToolResult("call-a", "a" * 900),
                     RawToolResult("call-b", "b" * 900),
-                )
+                ),
+                session_id="session",
             )
 
             self.assertEqual([len(message.content) for message in messages], [500, 500])
@@ -191,11 +195,11 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=Path(tmp),
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="session",
             )
 
             message = manager.process(
-                (RawToolResult("../../escape", "x" * 1_000),)
+                (RawToolResult("../../escape", "x" * 1_000),),
+                session_id="session",
             )[0]
 
             assert message.preview is not None
@@ -214,11 +218,13 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=root,
                 individual_limit=10,
                 aggregate_limit=10,
-                session_id="session",
             )
 
             with self.assertRaises(ToolResultBudgetError):
-                manager.process((RawToolResult("call-1", "x" * 20),))
+                manager.process(
+                    (RawToolResult("call-1", "x" * 20),),
+                    session_id="session",
+                )
 
             self.assertEqual(list(root.rglob("*")), [])
 
@@ -230,32 +236,42 @@ class ToolResultManagerTests(unittest.TestCase):
                 persist_directory=blocked,
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="session",
             )
 
             with self.assertRaises(ToolResultPersistenceError):
-                manager.process((RawToolResult("call-1", "x" * 1_000),))
+                manager.process(
+                    (RawToolResult("call-1", "x" * 1_000),),
+                    session_id="session",
+                )
 
-    def test_rotate_session_changes_future_storage_directory(self) -> None:
+    def test_one_manager_can_write_to_multiple_session_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manager = ToolResultManager(
                 persist_directory=Path(tmp),
                 individual_limit=500,
                 aggregate_limit=800,
-                session_id="first",
             )
-            message = manager.process(
-                (RawToolResult("call-1", "x" * 1_000),)
+            first = manager.process(
+                (RawToolResult("call-1", "x" * 1_000),),
+                session_id="first",
             )[0]
-            assert message.preview is not None
-            old_path = message.preview.persisted_path
+            second = manager.process(
+                (RawToolResult("call-1", "y" * 1_000),),
+                session_id="second",
+            )[0]
 
-            new_session = manager.rotate_session()
+            assert first.preview is not None
+            assert second.preview is not None
+            self.assertEqual(first.preview.persisted_path.parent.parent.name, "first")
+            self.assertEqual(second.preview.persisted_path.parent.parent.name, "second")
+            self.assertTrue(first.preview.persisted_path.exists())
+            self.assertTrue(second.preview.persisted_path.exists())
 
-            self.assertNotEqual(new_session, "first")
-            self.assertEqual(manager.session_id, new_session)
-            self.assertEqual(len(new_session), 32)
-            self.assertTrue(old_path.exists())
+    def test_unsafe_session_id_is_rejected(self) -> None:
+        manager = ToolResultManager()
+
+        with self.assertRaisesRegex(ValueError, "session ID"):
+            manager.process((), session_id="../escape")
 
     def test_default_persist_directory_honors_xdg_data_home(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
