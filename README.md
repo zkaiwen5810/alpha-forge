@@ -51,10 +51,33 @@ model produces a response without tool calls. Completed cross-turn history
 retains the user prompt and final assistant response. A turn stops with an
 error after 10 model iterations to prevent runaway tool loops.
 
+Tool result content is bounded before it is added to the model context. One
+result may contain at most 16,000 Unicode characters, and all results requested
+by one assistant iteration may contain at most 32,000 characters in aggregate.
+When multiple results exceed the aggregate limit, Alpha Forge shares the
+available space fairly while leaving results that already fit their share
+unchanged.
+
+An oversized result is replaced by a self-identifying preview containing the
+beginning and end of the result, the original character count, the truncation
+reason, and the local path of the complete result. Only previewed originals are
+persisted. The default layout is:
+
+```text
+$XDG_DATA_HOME/alpha-forge/<session-id>/tool-results/<tool-call-id>.{txt,json}
+```
+
+When `XDG_DATA_HOME` is unset, the base directory is
+`~/.local/share/alpha-forge`. Results that parse as JSON use `.json`; all other
+results use `.txt`. `/clear` starts a new storage session but does not delete
+previous files. Persisted results are not automatically restored, exposed as a
+file-reading tool, or cleaned up. The limits and persistence location are
+built-in policy rather than CLI or user-config fields.
+
 To build a controller with a custom registry:
 
 ```python
-from alpha_forge.session import ChatReplController
+from alpha_forge.repl_controller import ChatReplController
 from alpha_forge.tools import Tool, ToolRegistry
 
 registry = ToolRegistry([
@@ -80,19 +103,26 @@ execution and custom validator invocation are intentionally deferred.
 
 ### Conversation history
 
+REPL orchestration lives in `alpha_forge.repl_controller`, while transcript
+view models and rendering logic live in `alpha_forge.ui_state`. The controller
+exposes the latter as `controller.ui_state`. `alpha_forge.session` remains a
+compatibility import facade and contains no orchestration or UI implementation.
+
 The history panel groups each user turn into one block. Model iterations are
 stored as bundled snapshots so streaming text, tool calls, tool results, and
 intermediate assistant notes share one rendering path.
 
 Within a turn, tool calls and results are indented and rendered without blank
-lines. Calls appear atomically before execution, results appear atomically
-after execution, and model text continues streaming whenever available. Text
-from a tool-requesting iteration is retained beneath its tool result as an
-italic cyan `Assistant note`. Separate turns and command notices have one blank
-line between their blocks. When the provider includes token usage, the latest
-model iteration of the latest turn ends with a right-aligned summary such as
-`Total tokens: 1,555 | Prompt cache: 72% reused`. Providers that omit cache
-details still show the total, while raw cached-token counts are not displayed.
+lines. Calls appear atomically before execution. All results from one assistant
+iteration are collected before aggregate budgeting; the resulting full values
+or previews then appear in call order. Model text continues streaming whenever
+available. Text from a tool-requesting iteration is retained beneath its tool
+result as an italic cyan `Assistant note`. Separate turns and command notices
+have one blank line between their blocks. When the provider includes token
+usage, the latest model iteration of the latest turn ends with a right-aligned
+summary such as `Total tokens: 1,555 | Prompt cache: 72% reused`. Providers that
+omit cache details still show the total, while raw cached-token counts are not
+displayed.
 
 ## Local secrets
 

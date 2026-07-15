@@ -13,7 +13,7 @@ from alpha_forge.config import (
     build_config,
     default_user_config_path,
 )
-from alpha_forge.session import DEFAULT_SYSTEM_PROMPT, ChatReplController
+from alpha_forge.repl_controller import DEFAULT_SYSTEM_PROMPT, ChatReplController
 from alpha_forge.terminal_ui import TerminalChatUi
 
 

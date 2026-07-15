@@ -17,13 +17,10 @@ from prompt_toolkit.output import DummyOutput
 from alpha_forge.chat import ChatStreamEvent
 from alpha_forge.cli import build_parser, main
 from alpha_forge.config import Config
-from alpha_forge.session import (
-    ChatReplController,
-    IterationOutput,
-    TokenUsage,
-)
+from alpha_forge.repl_controller import ChatReplController
 from alpha_forge.slash_commands import SlashCommandCompleter
 from alpha_forge.terminal_ui import TerminalChatUi
+from alpha_forge.ui_state import IterationOutput, TokenUsage
 
 
 @contextlib.contextmanager
@@ -89,7 +86,7 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(completions, [])
         self.assertTrue(ui._has_pending_prompts())
-        self.assertEqual(controller.state.pending_prompts, ["hello"])
+        self.assertEqual(controller.ui_state.pending_prompts, ["hello"])
 
     def test_slash_suggestions_render_in_prompt_subpanel(self) -> None:
         class FakeChatClient:
@@ -168,7 +165,7 @@ class CliTests(unittest.TestCase):
                 return []
 
         controller = self._controller(FakeChatClient())
-        controller.state.add_notice("copy me")
+        controller.ui_state.add_notice("copy me")
         output = DummyOutput()
         writes: list[str] = []
         flushes: list[bool] = []
@@ -198,7 +195,7 @@ class CliTests(unittest.TestCase):
                 return []
 
         controller = self._controller(FakeChatClient())
-        controller.state.add_notice("\n".join(f"line {index}" for index in range(30)))
+        controller.ui_state.add_notice("\n".join(f"line {index}" for index in range(30)))
 
         with create_pipe_input() as pipe_input:
             ui = TerminalChatUi(
@@ -377,7 +374,7 @@ class CliTests(unittest.TestCase):
 
         self.assertTrue(keep_text)
         self.assertEqual(ui.input_area.text, "/model")
-        self.assertEqual(controller.state.pending_prompts, [])
+        self.assertEqual(controller.ui_state.pending_prompts, [])
 
     def test_tab_uses_slash_autocomplete(self) -> None:
         class FakeChatClient:
@@ -418,7 +415,7 @@ class CliTests(unittest.TestCase):
                 input=pipe_input,
                 output=DummyOutput(),
             )
-            controller.state.add_notice("\n".join(f"line {index}" for index in range(20)))
+            controller.ui_state.add_notice("\n".join(f"line {index}" for index in range(20)))
             ui.refresh()
             ui._history_follow_tail = False
             ui._history_scroll_offset = 1
@@ -426,7 +423,7 @@ class CliTests(unittest.TestCase):
             ui.refresh()
             self.assertEqual(ui._history_scroll_offset, 1)
 
-            controller.state.add_notice("new tail")
+            controller.ui_state.add_notice("new tail")
             ui.refresh()
 
         self.assertEqual(ui._history_scroll_offset, 1)
@@ -447,7 +444,7 @@ class CliTests(unittest.TestCase):
                 input=pipe_input,
                 output=DummyOutput(),
             )
-            controller.state.add_notice("\n".join(f"line {index}" for index in range(20)))
+            controller.ui_state.add_notice("\n".join(f"line {index}" for index in range(20)))
             ui.refresh()
             ui._history_total_lines = 200
             ui._history_view_height = 20
@@ -523,11 +520,11 @@ class CliTests(unittest.TestCase):
 
         controller = asyncio.run(scenario())
 
-        self.assertEqual(controller.state.pending_prompts, [])
-        self.assertIn("reply-to:hello", controller.state.history_text())
-        self.assertIn("reply-to:second", controller.state.history_text())
-        self.assertIn("You: hello", controller.state.history_text())
-        self.assertNotIn("Alpha:", controller.state.history_text())
+        self.assertEqual(controller.ui_state.pending_prompts, [])
+        self.assertIn("reply-to:hello", controller.ui_state.history_text())
+        self.assertIn("reply-to:second", controller.ui_state.history_text())
+        self.assertIn("You: hello", controller.ui_state.history_text())
+        self.assertNotIn("Alpha:", controller.ui_state.history_text())
 
     def test_user_messages_use_distinct_history_style(self) -> None:
         class FakeChatClient:
@@ -539,8 +536,8 @@ class CliTests(unittest.TestCase):
                 return []
 
         controller = self._controller(FakeChatClient())
-        turn = controller.state.start_turn("hello")
-        controller.state.set_iteration(
+        turn = controller.ui_state.start_turn("hello")
+        controller.ui_state.set_iteration(
             turn,
             0,
             IterationOutput(assistant_text="reply"),
@@ -595,8 +592,8 @@ class CliTests(unittest.TestCase):
                 return []
 
         controller = self._controller(FakeChatClient())
-        turn = controller.state.start_turn("hello")
-        controller.state.set_iteration(
+        turn = controller.ui_state.start_turn("hello")
+        controller.ui_state.set_iteration(
             turn,
             0,
             IterationOutput(
@@ -641,8 +638,8 @@ class CliTests(unittest.TestCase):
 
         controller = asyncio.run(scenario())
 
-        self.assertEqual(controller.state.pending_prompts, [])
-        self.assertIn("request failed: boom", controller.state.history_text())
+        self.assertEqual(controller.ui_state.pending_prompts, [])
+        self.assertIn("request failed: boom", controller.ui_state.history_text())
 
     def test_parser_does_not_expose_system_option(self) -> None:
         help_text = build_parser().format_help()
@@ -684,7 +681,7 @@ class CliTests(unittest.TestCase):
             chat=FakeChatClient(),
         )
         controller.submit("/model")
-        output = controller.state.history_text()
+        output = controller.ui_state.history_text()
 
         self.assertIn("  gpt-other", output)
         self.assertIn("* gpt-test", output)
@@ -703,7 +700,7 @@ class CliTests(unittest.TestCase):
             chat=FakeChatClient(),
         )
         controller.submit("/model")
-        output = controller.state.history_text()
+        output = controller.ui_state.history_text()
 
         self.assertIn("* openai/gpt-4o", output)
 

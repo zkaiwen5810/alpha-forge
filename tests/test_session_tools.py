@@ -1,17 +1,24 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 
+import alpha_forge.session as session_compat
 from alpha_forge.chat import ChatStreamEvent
 from alpha_forge.config import Config
-from alpha_forge.conversation import ToolCall
-from alpha_forge.session import (
+from alpha_forge.conversation import AssistantMessage, ToolCall, ToolMessage
+from alpha_forge.repl_controller import (
     MAX_TOOL_ITERATIONS,
-    ChatUiState,
     ChatReplController,
+    WorkItem,
+)
+from alpha_forge.tool_results import ToolResultManager
+from alpha_forge.tools import Tool, ToolRegistry
+from alpha_forge.ui_state import (
+    ChatUiState,
     IterationOutput,
     TokenUsage,
     ToolExchange,
-    WorkItem,
 )
 
 
@@ -29,9 +36,26 @@ class ScriptedToolChat:
         return []
 
 
+class SessionCompatibilityTests(unittest.TestCase):
+    def test_session_facade_reexports_split_modules(self) -> None:
+        self.assertIs(session_compat.ChatReplController, ChatReplController)
+        self.assertIs(session_compat.ChatUiState, ChatUiState)
+        self.assertIs(session_compat.IterationOutput, IterationOutput)
+
+
 class SessionToolLoopTests(unittest.TestCase):
-    def _controller(self, chat):  # type: ignore[no-untyped-def]
-        return ChatReplController(Config(api_key="sk-test"), chat=chat)
+    def _controller(self, chat, **kwargs):  # type: ignore[no-untyped-def]
+        return ChatReplController(
+            Config(api_key="sk-test"),
+            chat=chat,
+            **kwargs,
+        )
+
+    def test_controller_names_ui_state_explicitly(self) -> None:
+        controller = self._controller(ScriptedToolChat([]))
+
+        self.assertIsInstance(controller.ui_state, ChatUiState)
+        self.assertFalse(hasattr(controller, "state"))
 
     def test_tool_call_iterates_until_final_response_and_updates_turn_block(self) -> None:
         chat = ScriptedToolChat(
@@ -76,7 +100,7 @@ class SessionToolLoopTests(unittest.TestCase):
         item = WorkItem("What is 2 + 3 * 4?")
         redraws: list[str] = []
         controller.request_redraw = lambda: redraws.append(
-            controller.state.history_text()
+            controller.ui_state.history_text()
         )
 
         asyncio.run(controller._stream_response(item))
@@ -88,7 +112,7 @@ class SessionToolLoopTests(unittest.TestCase):
         self.assertEqual(second_messages[-1].tool_call_id, "call-1")
         self.assertEqual(second_messages[-1].content, "14")
         self.assertTrue(chat.requests[0][1])
-        history = controller.state.history_text()
+        history = controller.ui_state.history_text()
         self.assertIn(
             '  Tool call [calculator]: {"expression":"2 + 3 * 4"}',
             history,
@@ -166,7 +190,7 @@ class SessionToolLoopTests(unittest.TestCase):
         controller = self._controller(chat)
         redraws: list[str] = []
         controller.request_redraw = lambda: redraws.append(
-            controller.state.history_text()
+            controller.ui_state.history_text()
         )
 
         asyncio.run(
@@ -178,7 +202,7 @@ class SessionToolLoopTests(unittest.TestCase):
         ]
         self.assertEqual([message.content for message in tool_messages[:1]], ["3.0"])
         self.assertIn("error: unknown tool: missing", tool_messages[1].content or "")
-        history = controller.state.history_text()
+        history = controller.ui_state.history_text()
         self.assertIn("  Tool result [calculator]: 3.0", history)
         self.assertIn("  Tool error [missing]: error: unknown tool: missing", history)
         call_one = next(
@@ -192,7 +216,7 @@ class SessionToolLoopTests(unittest.TestCase):
             index
             for index, snapshot in enumerate(redraws)
             if "Tool result [calculator]" in snapshot
-            and "Tool call [missing]" not in snapshot
+            and "Tool error [missing]" not in snapshot
         )
         call_two = next(
             index
@@ -205,9 +229,10 @@ class SessionToolLoopTests(unittest.TestCase):
             for index, snapshot in enumerate(redraws)
             if "Tool error [missing]" in snapshot
         )
-        self.assertLess(call_one, result_one)
-        self.assertLess(result_one, call_two)
+        self.assertLess(call_one, call_two)
+        self.assertLess(call_two, result_one)
         self.assertLess(call_two, result_two)
+        self.assertLess(result_one, result_two)
 
     def test_malformed_arguments_become_failed_tool_result(self) -> None:
         controller = self._controller(ScriptedToolChat([]))
@@ -218,6 +243,129 @@ class SessionToolLoopTests(unittest.TestCase):
 
         self.assertTrue(failed)
         self.assertTrue(result.startswith("error:"))
+
+    def test_preview_is_sent_to_model_rendered_in_ui_and_persisted(self) -> None:
+        full_result = (
+            "HEAD"
+            + ("a" * 500)
+            + "SECRET_MIDDLE"
+            + ("b" * 500)
+            + "TAIL"
+        )
+        tool = Tool(
+            name="large_result",
+            function=lambda _arguments: full_result,
+            description="Return a large result.",
+            prompt="Return a large result.",
+            input_schema={"type": "object"},
+        )
+        chat = ScriptedToolChat(
+            [
+                [
+                    ChatStreamEvent(
+                        type="tool_call_delta",
+                        index=0,
+                        call_id="call-large",
+                        name="large_result",
+                        arguments="{}",
+                    )
+                ],
+                [ChatStreamEvent(type="text_delta", text="Done.")],
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = ToolResultManager(
+                persist_directory=Path(tmp),
+                individual_limit=500,
+                aggregate_limit=800,
+                session_id="session",
+            )
+            controller = self._controller(
+                chat,
+                tool_registry=ToolRegistry([tool]),
+                tool_result_manager=manager,
+            )
+
+            asyncio.run(controller._stream_response(WorkItem("run it")))
+
+            tool_message = chat.requests[1][0][-1]
+            self.assertIsInstance(tool_message, ToolMessage)
+            self.assertIn("[alpha-forge tool-result-preview]", tool_message.content)
+            self.assertNotIn("SECRET_MIDDLE", tool_message.content)
+            assert tool_message.preview is not None
+            self.assertEqual(
+                tool_message.preview.persisted_path.read_text(),
+                full_result,
+            )
+            self.assertIn(
+                str(tool_message.preview.persisted_path),
+                tool_message.content,
+            )
+            history = controller.ui_state.history_text()
+            self.assertIn("Tool result preview [large_result]", history)
+            self.assertIn("[alpha-forge tool-result-preview]", history)
+            self.assertNotIn("SECRET_MIDDLE", history)
+
+    def test_persistence_failure_avoids_incomplete_assistant_message(self) -> None:
+        full_result = "x" * 1_000
+        tool = Tool(
+            name="large_result",
+            function=lambda _arguments: full_result,
+            description="Return a large result.",
+            prompt="Return a large result.",
+            input_schema={"type": "object"},
+        )
+        chat = ScriptedToolChat(
+            [
+                [
+                    ChatStreamEvent(
+                        type="tool_call_delta",
+                        index=0,
+                        call_id="call-large",
+                        name="large_result",
+                        arguments="{}",
+                    )
+                ],
+                [ChatStreamEvent(type="text_delta", text="unreachable")],
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            blocked = Path(tmp) / "blocked"
+            blocked.write_text("not a directory")
+            manager = ToolResultManager(
+                persist_directory=blocked,
+                individual_limit=500,
+                aggregate_limit=800,
+                session_id="session",
+            )
+            controller = self._controller(
+                chat,
+                tool_registry=ToolRegistry([tool]),
+                tool_result_manager=manager,
+            )
+
+            asyncio.run(controller._stream_response(WorkItem("run it")))
+
+        self.assertEqual(len(chat.requests), 1)
+        self.assertFalse(
+            any(
+                isinstance(message, AssistantMessage)
+                for message in controller.conversation.messages
+            )
+        )
+        self.assertIn("request failed: cannot persist", controller.ui_state.history_text())
+
+    def test_clear_rotates_tool_result_session(self) -> None:
+        manager = ToolResultManager(session_id="before")
+        controller = self._controller(
+            ScriptedToolChat([]),
+            tool_result_manager=manager,
+        )
+
+        controller.submit("/clear")
+
+        self.assertNotEqual(manager.session_id, "before")
+        self.assertIn("conversation cleared", controller.ui_state.history_text())
 
     def test_queued_turn_uses_completed_history_from_previous_turn(self) -> None:
         chat = ScriptedToolChat(
@@ -321,7 +469,7 @@ class SessionToolLoopTests(unittest.TestCase):
         self.assertEqual(len(chat.requests), MAX_TOOL_ITERATIONS)
         self.assertIn(
             f"request failed: tool iteration limit reached ({MAX_TOOL_ITERATIONS})",
-            controller.state.history_text(),
+            controller.ui_state.history_text(),
         )
 
 
@@ -338,7 +486,7 @@ class BlockHistoryTests(unittest.TestCase):
                     ToolExchange(
                         name="calculator",
                         arguments='{"expression":"2+2"}',
-                        result="4",
+                        result=ToolMessage("4", tool_call_id="call-1"),
                     ),
                 ),
                 tool_requesting=True,
