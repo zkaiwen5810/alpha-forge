@@ -8,6 +8,79 @@ Project constraint:
 - Do not introduce SiliconFlow-specific API keys, base URLs, model names, or config as defaults.
 - Use provider-specific settings only when they are strictly necessary, and keep them opt-in behind generic OpenAI-compatible overrides such as `OPENAI_BASE_URL`.
 
+## Usage
+
+![Alpha Forge terminal UI showing conversation history, tool calls, and token statistics](static/ui_screenshot.png)
+
+### Prerequisites
+
+- Python 3.14 or newer
+- [`uv`](https://docs.astral.sh/uv/)
+- An OpenAI API key
+
+Clone the repository and install the project environment:
+
+```sh
+git clone https://github.com/zkaiwen5810/alpha-forge.git
+cd alpha-forge
+uv sync
+```
+
+Provide your API key in the environment. The model and timeout are optional;
+their built-in defaults are `gpt-4.1-mini` and 30 seconds.
+
+```sh
+export OPENAI_API_KEY="sk-..."
+# Optional:
+export OPENAI_MODEL="gpt-4.1-mini"
+export OPENAI_TIMEOUT="30"
+```
+
+Alternatively, generate a persistent user configuration and add the key to
+the resulting TOML file:
+
+```sh
+uv run alpha-forge --init-config
+# Edit ~/.config/alpha-forge/config.toml
+```
+
+API keys are intentionally not accepted as command-line arguments.
+
+### Run from source
+
+Start the terminal UI from the repository root:
+
+```sh
+uv run alpha-forge
+```
+
+Enter a prompt and press Enter. Alpha Forge can stream a response and use its
+built-in calculator, file-reading, file-writing, and Bash tools when needed.
+For example, this prompt gives the agent room to demonstrate a complete
+inspect-and-verify workflow:
+
+```text
+Inspect this project, explain how it is structured, run its tests, and suggest
+the three most valuable improvements. Cite the files that support your answer.
+```
+
+Useful commands inside the terminal UI:
+
+- `/help` — show available commands
+- `/model` — list available models
+- `/clear` — start a new conversation
+- `/exit` or `/quit` — close Alpha Forge
+
+For a one-off runtime override, pass a non-secret option after the executable:
+
+```sh
+uv run alpha-forge --model gpt-4.1-mini --timeout 60
+```
+
+Leave `OPENAI_BASE_URL` unset to use OpenAI directly. To intentionally route
+the SDK through an OpenAI-compatible gateway such as LiteLLM, set the generic
+base URL or use `--base-url`; see [LiteLLM proxy](#litellm-proxy).
+
 ## Architecture
 
 The application is built around the OpenAI SDK and the OpenAI API shape.
