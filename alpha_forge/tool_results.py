@@ -16,6 +16,7 @@ from alpha_forge.conversation import (
 )
 
 MAX_TOOL_RESULT_CHARS = 16_000
+# MAX_TOOL_RESULT_CHARS = 512
 MAX_TOOL_RESULTS_CHARS = 32_000
 _SAFE_CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,120}\Z")
 _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,120}\Z")

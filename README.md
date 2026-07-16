@@ -43,13 +43,32 @@ provides:
 - `ToolRegistry` registration, lookup, OpenAI schema generation, and dispatch.
 - `load_builtin_tools()` for loading the tools shipped with Alpha Forge.
 
-The default registry includes a safe `calculator` tool for arithmetic
-expressions. The current `Session` sends registered tool definitions through
-the OpenAI Chat Completions API, records calls and results in its model context,
-and continues the same user turn until the model produces a response without
-tool calls. Completed cross-turn history retains the user prompt and final
-assistant response. A turn stops with an error after 10 model iterations to
-prevent runaway tool loops.
+The default registry includes a safe `calculator` tool, a bounded UTF-8
+`file_reader`, a UTF-8 `file_writer`, and a non-interactive `bash` tool. The file
+reader accepts a zero-based character `offset` and bounded `limit`, then reports
+`next_offset` and `eof` so a large file can be consumed without overflowing the
+tool-result budget. The writer supports whole-file `write`, exclusive `create`,
+`append`, and guarded exact-text `replace` operations. The Bash tool accepts a
+required `cmd`, an optional working-directory `cwd`, and an optional timeout
+from 0.1 through 300 seconds (30 seconds by default). It captures stdout and
+stderr separately; nonzero exits and timeouts become failed tool results with
+their diagnostics preserved.
+
+Each Bash call runs in a fresh process through `bash --noprofile --norc -c`, so
+shell state does not persist between calls. The child environment inherits
+ordinary process settings but removes `BASH_ENV`, `ENV`, and underscore-delimited
+environment-name components commonly used for secrets, including `KEY`,
+`TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, and `CREDENTIALS`. This filtering is
+also applied to singular `CREDENTIAL`. It is defense in depth, not a sandbox:
+Bash commands retain the Alpha Forge process user's filesystem and network
+permissions and can read any accessible files.
+
+The current `Session` sends registered tool definitions through the OpenAI Chat
+Completions API, records calls and results in its model context, and continues
+the same user turn until the model produces a response without tool calls.
+Completed cross-turn history retains the user prompt and final assistant
+response. A turn stops with an error after 10 model iterations to prevent
+runaway tool loops.
 
 Tool result content is bounded before it is added to the model context. One
 result may contain at most 16,000 Unicode characters, and all results requested
@@ -72,8 +91,9 @@ When `XDG_DATA_HOME` is unset, the base directory is
 results use `.txt`. `/clear` creates a new `Session` with a new ID but does not
 delete previous files. An active turn finishes against the session in which it
 started, while queued turns that have not started use the new session.
-Persisted results are not automatically restored, exposed as a file-reading
-tool, or cleaned up. The limits and persistence location are built-in policy
+Persisted results are not automatically restored or cleaned up. The default
+`file_reader` can consume the `persisted_path` shown in a preview in bounded
+character ranges. The limits and persistence location are built-in policy
 rather than CLI or user-config fields.
 
 To build a controller with a custom registry:
