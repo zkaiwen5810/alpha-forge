@@ -10,6 +10,7 @@ from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
+from prompt_toolkit.formatted_text.base import StyleAndTextTuples
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input.base import Input
 from prompt_toolkit.key_binding import KeyBindings
@@ -28,16 +29,16 @@ from alpha_forge.slash_commands import SLASH_COMMANDS
 
 
 class HistoryControl(UIControl):
-    def __init__(self, ui: "TerminalChatUi") -> None:
+    def __init__(self, ui: TerminalChatUi) -> None:
         self.ui = ui
 
     def is_focusable(self) -> bool:
         """Tell prompt-toolkit this custom control can receive focus."""
         return True
 
-    def create_content(self, _width: int, _height: int | None) -> UIContent:
+    def create_content(self, width: int, height: int) -> UIContent:
         """Build the renderable content prompt-toolkit asks a UIControl for."""
-        lines = self.ui._history_line_fragments(_width, _height)
+        lines = self.ui._history_line_fragments(width, height)
         return UIContent(
             get_line=lambda index: lines[index],
             line_count=len(lines),
@@ -74,7 +75,7 @@ class TerminalChatUi:
             get_vertical_scroll=self._get_history_vertical_scroll,
             always_hide_cursor=True,
         )
-        self.history_container = self.history_window
+        self.history_container = HSplit([self.history_window])
         self.pending_area = TextArea(
             read_only=True,
             focusable=True,
@@ -210,19 +211,14 @@ class TerminalChatUi:
             return ""
 
         return "\n".join(
-            f"{command.name:<8} {command.description}"
-            for command in matches
+            f"{command.name:<8} {command.description}" for command in matches
         )
 
     def _matching_slash_commands(self):
         text = self.input_area.text
         if not text.startswith("/") or " " in text:
             return []
-        return [
-            command
-            for command in SLASH_COMMANDS
-            if command.name.startswith(text)
-        ]
+        return [command for command in SLASH_COMMANDS if command.name.startswith(text)]
 
     def _complete_slash_command(self) -> bool:
         matches = self._matching_slash_commands()
@@ -241,9 +237,9 @@ class TerminalChatUi:
         """Buffer change hook used to update slash suggestions while typing."""
         self.refresh()
 
-    def _history_fragments(self) -> list[tuple[str, str]]:
+    def _history_fragments(self) -> StyleAndTextTuples:
         lines = self._history_display_line_fragments(width=80)
-        fragments: list[tuple[str, str]] = []
+        fragments: StyleAndTextTuples = []
         for lineno, line in enumerate(lines):
             fragments.extend(line)
             if lineno < len(lines) - 1:
@@ -254,7 +250,7 @@ class TerminalChatUi:
         self,
         width: int,
         height: int | None,
-    ) -> list[list[tuple[str, str]]]:
+    ) -> list[StyleAndTextTuples]:
         lines = self._history_display_line_fragments(width)
         self._history_total_lines = max(1, len(lines))
         if height is not None:
@@ -262,8 +258,11 @@ class TerminalChatUi:
         self._sync_history_scroll()
         return lines or [[("", "")]]
 
-    def _history_display_line_fragments(self, width: int) -> list[list[tuple[str, str]]]:
-        fragments: list[list[tuple[str, str]]] = []
+    def _history_display_line_fragments(
+        self,
+        width: int,
+    ) -> list[StyleAndTextTuples]:
+        fragments: list[StyleAndTextTuples] = []
         for line in self.controller.ui_state.history_lines():
             style = self._history_line_style(line.role)
             text = (
@@ -366,14 +365,17 @@ class TerminalChatUi:
         encoded = base64.b64encode(self._history_plain_text().encode()).decode()
         self.app.output.write_raw(f"\x1b]52;c;{encoded}\a")
         self.app.output.flush()
-        self._ui_status = "conversation copied"
+        self._ui_status = "transcript copied"
         if self.app.is_running:
             self.app.invalidate()
 
     def _history_plain_text(self) -> str:
-        return self.controller.ui_state.history_text()
+        return self.controller.ui_state.transcript_text()
 
-    def _route_scroll_events_to_history(self, control) -> None:  # type: ignore[no-untyped-def]
+    def _route_scroll_events_to_history(  # type: ignore[no-untyped-def]
+        self,
+        control,
+    ) -> None:
         """Wrap a prompt-toolkit mouse handler so wheel events scroll history."""
         original_mouse_handler = control.mouse_handler
 
@@ -403,9 +405,7 @@ class TerminalChatUi:
     def _scroll_history_lines(self, amount: int) -> None:
         max_scroll = self._history_scroll_max()
         current_scroll = (
-            max_scroll
-            if self._history_follow_tail
-            else self._history_scroll_offset
+            max_scroll if self._history_follow_tail else self._history_scroll_offset
         )
         next_scroll = current_scroll + amount
         self._history_scroll_offset = min(max(next_scroll, 0), max_scroll)
@@ -473,6 +473,7 @@ class TerminalChatUi:
                 "status": "reverse",
                 "section-title": "bold",
                 "history": "",
+                "active": "",
                 "pending": "",
                 "input": "",
                 "slash-suggestions": "#bbbbbb",

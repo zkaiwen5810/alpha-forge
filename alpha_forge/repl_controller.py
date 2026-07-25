@@ -1,55 +1,105 @@
-"""REPL queueing, model streaming, tool orchestration, and commands."""
+"""REPL orchestration across session, ephemeral UI, tools, and commands."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
 
-from alpha_forge.chat import ChatClient, ChatStreamEvent
+from alpha_forge.chat import ChatClient
 from alpha_forge.config import Config
-from alpha_forge.conversation import ToolCall
+from alpha_forge.events import Event, EventRouter
+from alpha_forge.models import ToolCall
 from alpha_forge.session import DEFAULT_SYSTEM_PROMPT, Session
 from alpha_forge.slash_commands import SlashCommandHandler
-from alpha_forge.slash_commands.base import CommandContext
-from alpha_forge.tool_results import RawToolResult, ToolResultManager
-from alpha_forge.tools import ToolError, ToolRegistry, load_builtin_tools
-from alpha_forge.ui_state import (
-    ChatUiState,
-    ConversationTurnBlock,
-    IterationOutput,
-    TokenUsage,
-    ToolExchange,
+from alpha_forge.slash_commands.base import (
+    CommandContext,
+    CommandOutcome,
 )
+from alpha_forge.streaming import StreamCompleted
+from alpha_forge.system_events import (
+    AssistantMessageAdded,
+    AssistantMessageAddFailed,
+    ExitRequested,
+    ModelResponseStarted,
+    RequestFailed,
+    SessionSelected,
+    StatusChanged,
+    ToolBatchStarted,
+    ToolResultsAddFailed,
+    ToolResultsFinalized,
+    ToolResultsUpdated,
+    ToolStarted,
+    TranscriptUpdated,
+)
+from alpha_forge.tools import (
+    Tool,
+    ToolError,
+    ToolNotFoundError,
+    ToolRegistry,
+    load_builtin_tools,
+)
+from alpha_forge.transcript import (
+    CommandMessage,
+    ModelOutput,
+    TranscriptError,
+)
+from alpha_forge.ui_state import ChatUiState
 
-MAX_TOOL_ITERATIONS = 10
+MAX_TOOL_ROUNDS = 10
 
 Redraw = Callable[[], None]
 ExitRequest = Callable[[int], None]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorkItem:
     prompt: str
+    turn_id: str | None = None
 
 
-@dataclass
-class _PendingToolCall:
-    """Accumulator for one streamed tool call, keyed by provider index."""
+class AssistantMessageAddError(RuntimeError):
+    """Raised after a completed response could not be added to Session."""
 
-    call_id: str = ""
-    name: str = ""
-    arguments: str = ""
+
+class ToolResultsAddError(RuntimeError):
+    """Raised after completed tool data could not be added to Session."""
+
+
+@dataclass(slots=True)
+class _SessionAssistantConsumer:
+    session: Session
+    turn_id: str
+    events: EventRouter
+    output: ModelOutput | None = None
+
+    def handle(self, event: StreamCompleted) -> None:
+        try:
+            self.output = self.session.add_assistant_message(
+                turn_id=self.turn_id,
+                response=event.response,
+            )
+        except Exception as exc:
+            message = str(exc) or type(exc).__name__
+            self.events.publish(AssistantMessageAddFailed(message))
+            raise AssistantMessageAddError(message) from exc
+        self.events.publish(
+            AssistantMessageAdded(
+                self.output,
+                self.session.head_turn_id,
+            )
+        )
+
+    def result(self) -> ModelOutput:
+        if self.output is None:
+            raise RuntimeError("model stream ended without a completed response")
+        return self.output
 
 
 class ChatReplController:
-    """Coordinate session lifecycle, background work, tools, and UI snapshots.
-
-    The controller owns application flow but not terminal rendering. It writes
-    view-ready snapshots to ``ui_state`` and exposes lifecycle callbacks that a
-    concrete UI installs when it starts.
-    """
+    """Route completed activities through Session and deltas through UI state."""
 
     def __init__(
         self,
@@ -59,13 +109,10 @@ class ChatReplController:
         chat: ChatClient | None = None,
         command_handler: SlashCommandHandler | None = None,
         tool_registry: ToolRegistry | None = None,
-        tool_result_manager: ToolResultManager | None = None,
+        session: Session | None = None,
     ) -> None:
         self.config = config
-        self.session = Session(
-            system_prompt=system_prompt,
-            tool_result_manager=tool_result_manager,
-        )
+        self.session = session or Session(system_prompt=system_prompt)
         self.chat = chat if chat is not None else ChatClient(config)
         self.command_handler = (
             command_handler if command_handler is not None else SlashCommandHandler()
@@ -73,43 +120,51 @@ class ChatReplController:
         self.tool_registry = (
             tool_registry if tool_registry is not None else load_builtin_tools()
         )
-        self.ui_state = ChatUiState()
-
-        # The queue lets prompt submission remain synchronous and responsive;
-        # one consumer serializes model turns so each request sees a complete,
-        # ordered protocol history from all earlier requests.
-        self.queue: asyncio.Queue[WorkItem | None] = asyncio.Queue()
-        self.exiting = False
-
-        # UI lifecycle hooks default to no-ops for headless tests. A concrete
-        # UI later installs redraw and application-exit callbacks without
-        # becoming a dependency of the controller.
+        self._register_transcript_result_reader()
         self.request_redraw: Redraw = lambda: None
         self.request_app_exit: ExitRequest = lambda _exit_code: None
+        self.ui_state = ChatUiState(
+            self.session.transcript,
+            head_turn_id=self.session.head_turn_id,
+        )
+        self.events = EventRouter()
+        self.events.subscribe(Event, self._apply_ui_event)
+        self.queue: asyncio.Queue[WorkItem | None] = asyncio.Queue()
+        self.exiting = False
+        self._active_turn_id: str | None = None
+
+    def _apply_ui_event(self, event: Event) -> None:
+        if self.ui_state.handle(event):
+            self.request_redraw()
 
     def submit(self, user_input: str) -> None:
         if self.exiting:
             return
-
         text = user_input.strip()
         if not text:
             return
-
         if text.startswith("/"):
-            self._handle_command(text)
+            self._handle_command(user_input)
             return
-
-        self.ui_state.add_pending(user_input)
-        self.queue.put_nowait(WorkItem(user_input))
-        self.request_redraw()
+        if self.ui_state.has_unsaved_active:
+            self.events.publish(
+                StatusChanged("Cannot continue while completed output is not added")
+            )
+            return
+        try:
+            turn_id = self.session.submit_user(user_input)
+        except Exception as exc:
+            self.events.publish(StatusChanged(f"Cannot add prompt: {exc}"))
+            return
+        self.queue.put_nowait(WorkItem(user_input, turn_id))
+        self.events.publish(TranscriptUpdated(self.session.head_turn_id))
 
     def request_exit(self) -> None:
         if self.exiting:
             return
         self.exiting = True
-        self.ui_state.request_exit()
+        self.events.publish(ExitRequested())
         self.queue.put_nowait(None)
-        self.request_redraw()
 
     async def consume(self) -> None:
         while True:
@@ -123,225 +178,107 @@ class ChatReplController:
                 self.queue.task_done()
 
     async def _stream_response(self, item: WorkItem) -> None:
-        # A turn stays attached to the session in which it starts. If /clear
-        # runs while this coroutine is awaiting provider output, later writes
-        # still go to this captured session rather than the new current one.
         session = self.session
-        turn = self.ui_state.start_turn(item.prompt)
-        self.request_redraw()
+        turn_id = item.turn_id or session.submit_user(item.prompt)
+        self._active_turn_id = turn_id
 
-        session.add_user(item.prompt)
         try:
-            for iteration_index in range(MAX_TOOL_ITERATIONS):
-                iteration, tool_calls = await self._stream_iteration(
+            for _ in range(MAX_TOOL_ROUNDS):
+                output = await self._stream_model_response(
                     session,
-                    turn,
-                    iteration_index,
+                    turn_id,
                 )
-                if not tool_calls:
-                    self._finish_assistant_turn(
-                        session,
-                        turn,
-                        iteration_index,
-                        iteration,
-                    )
+                if not output.tool_calls:
                     return
 
+                self.events.publish(
+                    ToolBatchStarted(
+                        turn_id,
+                        output.output_id,
+                        output.tool_calls,
+                    )
+                )
                 await self._run_tool_calls(
                     session,
-                    turn,
-                    iteration_index,
-                    iteration,
-                    tool_calls,
+                    output.output_id,
+                    output.tool_calls,
                 )
-            raise RuntimeError(
-                f"tool iteration limit reached ({MAX_TOOL_ITERATIONS})"
-            )
+            raise RuntimeError(f"tool round limit reached ({MAX_TOOL_ROUNDS})")
         except Exception as exc:
-            self.ui_state.fail_turn(
-                turn,
-                str(exc) or type(exc).__name__,
-            )
-            self.request_redraw()
+            message = str(exc) or type(exc).__name__
+            try:
+                session.fail_turn(turn_id, message)
+            except Exception:
+                pass
+            if not isinstance(
+                exc,
+                (AssistantMessageAddError, ToolResultsAddError),
+            ):
+                self.events.publish(RequestFailed(message))
+        finally:
+            self._active_turn_id = None
 
-    async def _stream_iteration(
+    async def _stream_model_response(
         self,
         session: Session,
-        turn: ConversationTurnBlock,
-        iteration_index: int,
-    ) -> tuple[IterationOutput, tuple[ToolCall, ...]]:
-        iteration = IterationOutput()
-
-        # Providers stream tool-call fields as fragments. The stable numeric
-        # index, rather than fragment arrival order, identifies which call each
-        # delta extends when several calls are requested in one iteration.
-        pending_calls: dict[int, _PendingToolCall] = {}
-
-        async for event in self.chat.stream_response(
-            session.messages,
-            tools=self.tool_registry.definitions(),
-        ):
-            if event.type == "text_delta":
-                iteration = self._add_text_delta(
-                    turn,
-                    iteration_index,
-                    iteration,
-                    event.text,
-                )
-            elif event.type == "tool_call_delta":
-                iteration = self._add_tool_call_delta(
-                    turn,
-                    iteration_index,
-                    iteration,
-                    pending_calls,
-                    event,
-                )
-            elif (
-                event.prompt_tokens is not None
-                or event.cached_tokens is not None
-                or event.total_tokens is not None
+        turn_id: str,
+    ) -> ModelOutput:
+        consumer = _SessionAssistantConsumer(
+            session,
+            turn_id,
+            self.events,
+        )
+        with self.events.subscribe(StreamCompleted, consumer.handle):
+            self.events.publish(ModelResponseStarted(turn_id))
+            async for event in self.chat.stream_response(
+                session.messages_for_turn(turn_id),
+                tools=self.tool_registry.definitions(),
             ):
-                iteration = replace(
-                    iteration,
-                    token_usage=TokenUsage(
-                        prompt_tokens=event.prompt_tokens,
-                        cached_tokens=event.cached_tokens,
-                        total_tokens=event.total_tokens,
-                    ),
-                )
-                self._publish_iteration(turn, iteration_index, iteration)
-
-        return iteration, self._build_tool_calls(pending_calls)
-
-    def _add_text_delta(
-        self,
-        turn: ConversationTurnBlock,
-        iteration_index: int,
-        iteration: IterationOutput,
-        text: str,
-    ) -> IterationOutput:
-        updated = replace(
-            iteration,
-            assistant_text=iteration.assistant_text + text,
-        )
-        self._publish_iteration(turn, iteration_index, updated)
-        return updated
-
-    def _add_tool_call_delta(
-        self,
-        turn: ConversationTurnBlock,
-        iteration_index: int,
-        iteration: IterationOutput,
-        pending_calls: dict[int, _PendingToolCall],
-        event: ChatStreamEvent,
-    ) -> IterationOutput:
-        if event.index is None:
-            raise RuntimeError("tool-call delta is missing its index")
-
-        updated = iteration
-        if not updated.tool_requesting:
-            updated = replace(updated, tool_requesting=True)
-            self._publish_iteration(turn, iteration_index, updated)
-
-        pending = pending_calls.setdefault(event.index, _PendingToolCall())
-        pending.call_id += event.call_id
-        pending.name += event.name
-        pending.arguments += event.arguments
-        return updated
-
-    @staticmethod
-    def _build_tool_calls(
-        pending_calls: dict[int, _PendingToolCall],
-    ) -> tuple[ToolCall, ...]:
-        return tuple(
-            ToolCall(
-                id=pending.call_id,
-                name=pending.name,
-                arguments=pending.arguments,
-            )
-            for _, pending in sorted(pending_calls.items())
-        )
+                self.events.publish(event)
+        return consumer.result()
 
     async def _run_tool_calls(
         self,
         session: Session,
-        turn: ConversationTurnBlock,
-        iteration_index: int,
-        iteration: IterationOutput,
+        output_id: str,
         tool_calls: tuple[ToolCall, ...],
-    ) -> IterationOutput:
-        updated = iteration
-        first_exchange_index = len(updated.tools)
-        raw_results: list[RawToolResult] = []
+    ) -> None:
+        completed = []
         for tool_call in tool_calls:
-            exchange = ToolExchange(
-                name=tool_call.name,
-                arguments=tool_call.arguments,
-            )
-            updated = replace(
-                updated,
-                tools=(*updated.tools, exchange),
-            )
-            self._publish_iteration(turn, iteration_index, updated)
+            self.events.publish(ToolStarted(tool_call.id))
             await asyncio.sleep(0)
-
-            result, failed = self._execute_tool_call(tool_call)
-            raw_results.append(
-                RawToolResult(
-                    tool_call_id=tool_call.id,
-                    content=result,
+            content, failed = self._execute_tool_call(tool_call)
+            try:
+                result = session.add_tool_result(
+                    output_id=output_id,
+                    call_id=tool_call.id,
+                    content=content,
                     failed=failed,
                 )
+            except Exception as exc:
+                message = str(exc) or type(exc).__name__
+                self.events.publish(ToolResultsAddFailed(message))
+                raise ToolResultsAddError(message) from exc
+            completed.append(result)
+            decisions = session.provisional_tool_decisions(tuple(completed))
+            self.events.publish(
+                ToolResultsUpdated(
+                    tuple(completed),
+                    decisions,
+                )
             )
+            await asyncio.sleep(0)
 
-        # Aggregate budgeting requires every raw result from this iteration.
-        # Nothing is committed to protocol history until persistence and
-        # preview construction succeed, which prevents a failed write from
-        # leaving an assistant tool-call message without matching tool outputs.
-        tool_messages = session.record_tool_iteration(
-            iteration.assistant_text or None,
-            tool_calls=tool_calls,
-            raw_results=tuple(raw_results),
-        )
-
-        # Publish the same ToolMessage objects that were committed above. This
-        # keeps model and UI content identical while allowing results to become
-        # visible in call order after the batch budget has been decided.
-        for offset, tool_message in enumerate(tool_messages):
-            exchange_index = first_exchange_index + offset
-            completed_exchange = replace(
-                updated.tools[exchange_index],
-                result=tool_message,
+        try:
+            session.finalize_tool_results(
+                output_id=output_id,
+                results=tuple(completed),
             )
-            tools = list(updated.tools)
-            tools[exchange_index] = completed_exchange
-            updated = replace(
-                updated,
-                tools=tuple(tools),
-            )
-            self._publish_iteration(turn, iteration_index, updated)
-        return updated
-
-    def _finish_assistant_turn(
-        self,
-        session: Session,
-        turn: ConversationTurnBlock,
-        iteration_index: int,
-        iteration: IterationOutput,
-    ) -> None:
-        self._publish_iteration(turn, iteration_index, iteration)
-        session.add_assistant(iteration.assistant_text)
-        self.ui_state.finish_turn(turn)
-        self.request_redraw()
-
-    def _publish_iteration(
-        self,
-        turn: ConversationTurnBlock,
-        iteration_index: int,
-        iteration: IterationOutput,
-    ) -> None:
-        self.ui_state.set_iteration(turn, iteration_index, iteration)
-        self.request_redraw()
+        except Exception as exc:
+            message = str(exc) or type(exc).__name__
+            self.events.publish(ToolResultsAddFailed(message))
+            raise ToolResultsAddError(message) from exc
+        self.events.publish(ToolResultsFinalized(session.head_turn_id))
 
     def _execute_tool_call(self, tool_call: ToolCall) -> tuple[str, bool]:
         try:
@@ -353,30 +290,182 @@ class ChatReplController:
             return f"error: {exc}", True
 
     def _handle_command(self, text: str) -> None:
-        command_name = text.split(maxsplit=1)[0]
-        command_result = self.command_handler.handle(
-            text,
-            CommandContext(
-                config=self.config,
-                chat=self.chat,
-                print_text=self._add_notice,
-                start_new_session=self._start_new_session,
-            ),
+        source = self.session
+        parsed = self.command_handler.parse(text)
+        try:
+            command = source.add_command(
+                raw=parsed.raw,
+                name=parsed.name,
+                arguments=parsed.arguments,
+            )
+        except Exception as exc:
+            self.events.publish(StatusChanged(f"Cannot add command: {exc}"))
+            return
+
+        try:
+            outcome = self.command_handler.execute(
+                parsed,
+                CommandContext(config=self.config, chat=self.chat),
+            )
+        except Exception as exc:
+            outcome = CommandOutcome(
+                status="error",
+                messages=(
+                    CommandMessage(
+                        f"command failed: {exc}",
+                        "error",
+                    ),
+                ),
+            )
+
+        if outcome.action in ("clear", "resume"):
+            outcome = self._switch_session(
+                source,
+                command.command_id,
+                outcome,
+                resume_path=(parsed.arguments if outcome.action == "resume" else None),
+            )
+        save_error = self._record_command_outcome(
+            source,
+            command.command_id,
+            outcome,
         )
-        if command_result.exit_requested:
+
+        if outcome.action == "exit" and outcome.status == "success":
             self.request_exit()
             return
-        if command_result.handled:
-            self.request_redraw()
+        self.events.publish(TranscriptUpdated(self.session.head_turn_id))
+        if save_error is not None:
+            self.events.publish(StatusChanged(save_error))
+        elif outcome.status == "error" and outcome.messages:
+            self.events.publish(StatusChanged(outcome.messages[-1].content))
+
+    def _switch_session(
+        self,
+        source: Session,
+        command_id: str,
+        outcome: CommandOutcome,
+        *,
+        resume_path: str | None,
+    ) -> CommandOutcome:
+        if not self._can_switch_session():
+            action = "resume" if resume_path is not None else "clear"
+            return CommandOutcome(
+                status="error",
+                messages=(
+                    CommandMessage(
+                        f"cannot {action} while a response is active or "
+                        "prompts are queued",
+                        "error",
+                    ),
+                ),
+            )
+        try:
+            if resume_path is None:
+                destination = source.fresh()
+                pending = []
+                kind = "clear"
+            else:
+                destination = Session.resume(Path(resume_path))
+                pending = destination.recover_unfinished_turns()
+                kind = "resume"
+            destination.add_session_transition(
+                kind=kind,
+                source_session_id=source.session_id,
+                source_command_id=command_id,
+            )
+        except (OSError, ValueError, TranscriptError) as exc:
+            return CommandOutcome(
+                status="error",
+                messages=(
+                    CommandMessage(
+                        f"cannot {outcome.action} transcript: {exc}",
+                        "error",
+                    ),
+                ),
+            )
+
+        self.session = destination
+        self.events.publish(
+            SessionSelected(
+                destination.transcript,
+                destination.head_turn_id,
+            )
+        )
+        for turn in pending:
+            self.queue.put_nowait(WorkItem(turn.content, turn.turn_id))
+        return outcome
+
+    def _record_command_outcome(
+        self,
+        source: Session,
+        command_id: str,
+        outcome: CommandOutcome,
+    ) -> str | None:
+        try:
+            source.add_command_result(
+                command_id,
+                status=outcome.status,
+                messages=outcome.messages,
+            )
+        except Exception as exc:
+            return f"Cannot add command result: {exc}"
+        return None
+
+    def _can_switch_session(self) -> bool:
+        return (
+            self._active_turn_id is None
+            and self.queue.empty()
+            and not self.ui_state.has_unsaved_active
+        )
+
+    def _register_transcript_result_reader(self) -> None:
+        try:
+            self.tool_registry.get("tool_result_reader")
             return
+        except ToolNotFoundError:
+            pass
+        self.tool_registry.register(
+            Tool(
+                name="tool_result_reader",
+                function=self._read_transcript_result,
+                description="Read a complete result stored in this transcript.",
+                prompt=(
+                    "Read a raw tool result referenced by transcript_ref. "
+                    "Use offset and limit to page through large results."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "result_id": {"type": "string"},
+                        "offset": {"type": "integer", "minimum": 0},
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 16_000,
+                        },
+                    },
+                    "required": ["result_id"],
+                    "additionalProperties": False,
+                },
+            )
+        )
 
-        self.ui_state.add_error(f"unknown command: {command_name}")
-        self.request_redraw()
+    def _read_transcript_result(self, arguments: Mapping[str, object]) -> str:
+        result_id = arguments.get("result_id")
+        if not isinstance(result_id, str) or not result_id:
+            raise ValueError("result_id must be a non-empty string")
+        offset = arguments.get("offset", 0)
+        limit = arguments.get("limit", 16_000)
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            raise ValueError("offset must be an integer")
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise ValueError("limit must be an integer")
+        return self.session.read_tool_result(
+            result_id,
+            offset=offset,
+            limit=limit,
+        )
 
-    def _start_new_session(self) -> None:
-        self.session = self.session.fresh()
-        self.ui_state.clear_history()
 
-    def _add_notice(self, text: str) -> None:
-        self.ui_state.add_notice(text)
-        self.request_redraw()
+__all__ = ["MAX_TOOL_ROUNDS", "ChatReplController", "WorkItem"]

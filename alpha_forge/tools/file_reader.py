@@ -11,7 +11,7 @@ from alpha_forge.tool_results import MAX_TOOL_RESULT_CHARS
 from alpha_forge.tools.base import Tool, ToolExecutionError
 
 # Keep enough room for range metadata and for several ordinary reads to share
-# the aggregate iteration budget. These values track the central result policy.
+# the aggregate tool-batch budget. These values track the central result policy.
 DEFAULT_FILE_READ_CHARS = MAX_TOOL_RESULT_CHARS // 2
 MAX_FILE_READ_CHARS = MAX_TOOL_RESULT_CHARS * 3 // 4
 _IO_CHUNK_CHARS = 64 * 1024
@@ -132,8 +132,7 @@ FILE_READER_TOOL = Tool(
     prompt=(
         "Read a UTF-8 text file in bounded character ranges. Use offset 0 for "
         "the first range, then use the returned next_offset until eof is true. "
-        "This can read the persisted_path from an alpha-forge "
-        "tool-result-preview. Offsets count Unicode characters, not bytes."
+        "Offsets count Unicode characters, not bytes."
     ),
     input_schema={
         "type": "object",

@@ -10,6 +10,7 @@ The single public entry point used by ``alpha_forge.cli`` is
 :func:`build_config`, which handles ``--init-config``, ``.env`` loading,
 the user config file, env vars, CLI args, and the layered merge.
 """
+
 from __future__ import annotations
 
 import math
@@ -66,7 +67,7 @@ class Config:
     timeout: float = DEFAULT_TIMEOUT
 
     @classmethod
-    def from_layers(cls, *sources: ConfigSource) -> "Config":
+    def from_layers(cls, *sources: ConfigSource) -> Config:
         return resolve_config(*sources)
 
 
@@ -77,7 +78,7 @@ def default_user_config_path() -> Path:
     return base / "alpha-forge" / "config.toml"
 
 
-def build_config(args: "Namespace") -> Config:
+def build_config(args: Namespace) -> Config:
     """Resolve all configuration for the CLI in a single call.
 
     Handles, in order:
@@ -157,8 +158,7 @@ def load_user_config(path: Path) -> ConfigSource:
         value = section[key]
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ConfigError(
-                f"[openai].{key} in {path} must be a number, "
-                f"got {type(value).__name__}"
+                f"[openai].{key} in {path} must be a number, got {type(value).__name__}"
             )
         return _positive_timeout(value, f"[openai].{key} in {path}")
 
@@ -193,7 +193,7 @@ def load_env_config() -> ConfigSource:
     )
 
 
-def load_cli_config(args: "Namespace") -> ConfigSource:
+def load_cli_config(args: Namespace) -> ConfigSource:
     """Wrap the argparse ``Namespace``.
 
     Only flags the user actually passed contribute (the parser uses
@@ -250,6 +250,8 @@ def resolve_config(*sources: ConfigSource) -> Config:
 
 
 def _positive_timeout(value: object, source: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ConfigError(f"{source} must be a number of seconds")
     try:
         timeout = float(value)
     except (TypeError, ValueError) as exc:

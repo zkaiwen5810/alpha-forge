@@ -9,9 +9,11 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from alpha_forge.config import Config
-from alpha_forge.conversation import ToolCall
+from alpha_forge.model_messages import ToolCall
 from alpha_forge.repl_controller import ChatReplController
-from alpha_forge.tool_results import RawToolResult, ToolResultManager
+from alpha_forge.session import Session
+from alpha_forge.streaming import ModelResponse
+from alpha_forge.tool_results import TranscriptToolResultLimiter
 from alpha_forge.tools import (
     DEFAULT_BASH_TIMEOUT_SECONDS,
     MAX_BASH_TIMEOUT_SECONDS,
@@ -50,8 +52,7 @@ class BashToolTests(unittest.TestCase):
                     "cwd": {
                         "type": "string",
                         "description": (
-                            "Optional absolute or process-relative working "
-                            "directory."
+                            "Optional absolute or process-relative working directory."
                         ),
                     },
                     "timeout": {
@@ -110,10 +111,10 @@ class BashToolTests(unittest.TestCase):
                     {
                         "cmd": (
                             "printf '%s|%s|%s|%s' "
-                            "\"${ALPHA_TEST_VISIBLE-unset}\" "
-                            "\"${ALPHA_TEST_TOKEN-unset}\" "
-                            "\"${DATABASE_PASSWORD-unset}\" "
-                            "\"${OPENAI_API_KEY-unset}\""
+                            '"${ALPHA_TEST_VISIBLE-unset}" '
+                            '"${ALPHA_TEST_TOKEN-unset}" '
+                            '"${DATABASE_PASSWORD-unset}" '
+                            '"${OPENAI_API_KEY-unset}"'
                         )
                     },
                 )
@@ -131,9 +132,7 @@ class BashToolTests(unittest.TestCase):
             ToolCall(
                 "call-bash",
                 "bash",
-                json.dumps(
-                    {"cmd": "printf output; printf problem >&2; exit 7"}
-                ),
+                json.dumps({"cmd": "printf output; printf problem >&2; exit 7"}),
             )
         )
 
@@ -195,33 +194,46 @@ class BashToolTests(unittest.TestCase):
         self.assertIn("partial error", str(raised.exception))
         self.assertIn("timed_out: true", str(raised.exception))
 
-    def test_oversized_output_is_persisted_and_readable_by_range(self) -> None:
+    def test_oversized_output_is_self_contained_and_readable_by_range(self) -> None:
         result = self.registry.execute(
             "bash",
             {"cmd": "printf 'x%.0s' {1..20000}"},
         )
-        stdout_offset = result.index("--- stdout ---\n") + len(
-            "--- stdout ---\n"
+        stdout_offset = result.index("--- stdout ---\n") + len("--- stdout ---\n")
+        session = Session(
+            transcript=None,
+            tool_result_limiter=TranscriptToolResultLimiter(
+                individual_limit=500,
+                aggregate_limit=800,
+            ),
         )
-        with tempfile.TemporaryDirectory() as tmp:
-            message = ToolResultManager(
-                persist_directory=Path(tmp)
-            ).process(
-                (RawToolResult("call-bash", result),),
-                session_id="session",
-            )[0]
-            assert message.preview is not None
-            read_result = self.registry.execute(
-                "file_reader",
-                {
-                    "path": str(message.preview.persisted_path),
-                    "offset": stdout_offset,
-                    "limit": 25,
-                },
-            )
-            self.assertEqual(message.preview.persisted_path.read_text(), result)
+        turn_id = session.submit_user("run")
+        output = session.add_assistant_message(
+            turn_id=turn_id,
+            response=ModelResponse(
+                None,
+                (ToolCall("call-bash", "bash", "{}"),),
+            ),
+        )
+        raw = session.add_tool_result(
+            output_id=output.output_id,
+            call_id="call-bash",
+            content=result,
+            failed=False,
+        )
+        session.finalize_tool_results(
+            output_id=output.output_id,
+            results=(raw,),
+        )
 
-        self.assertTrue(read_result.endswith("x" * 25))
+        read_result = session.read_tool_result(
+            raw.result_id,
+            offset=stdout_offset,
+            limit=25,
+        )
+
+        self.assertTrue(read_result.startswith("x" * 25))
+        self.assertEqual(session.transcript.result(raw.result_id).content, result)
 
     def test_rejects_invalid_arguments_and_missing_bash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,5 +258,7 @@ class BashToolTests(unittest.TestCase):
         with patch("alpha_forge.tools.bash.shutil.which", return_value=None):
             with self.assertRaisesRegex(ToolExecutionError, "not found"):
                 run_bash({"cmd": "pwd"})
+
+
 if __name__ == "__main__":
     unittest.main()

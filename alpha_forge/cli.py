@@ -13,7 +13,8 @@ from alpha_forge.config import (
     build_config,
     default_user_config_path,
 )
-from alpha_forge.repl_controller import DEFAULT_SYSTEM_PROMPT, ChatReplController
+from alpha_forge.repl_controller import ChatReplController
+from alpha_forge.session import DEFAULT_SYSTEM_PROMPT
 from alpha_forge.terminal_ui import TerminalChatUi
 
 
@@ -38,9 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--init-config",
         action="store_true",
-        help=(
-            f"write a template config to {default_user_config_path()} and exit"
-        ),
+        help=(f"write a template config to {default_user_config_path()} and exit"),
     )
     return parser
 

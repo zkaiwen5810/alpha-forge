@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
-from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
 
 
@@ -12,7 +12,12 @@ class SlashCommandCompleter(Completer):
     def __init__(self, commands: Iterable[str]) -> None:
         self.commands = tuple(commands)
 
-    def get_completions(self, document: Document, _complete_event):
+    def get_completions(
+        self,
+        document: Document,
+        complete_event: CompleteEvent,
+    ) -> Iterator[Completion]:
+        del complete_event
         text = document.text_before_cursor
         if not text.startswith("/") or " " in text:
             return

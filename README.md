@@ -69,6 +69,7 @@ Useful commands inside the terminal UI:
 - `/help` — show available commands
 - `/model` — list available models
 - `/clear` — start a new conversation
+- `/resume PATH` — continue a saved transcript
 - `/exit` or `/quit` — close Alpha Forge
 
 For a one-off runtime override, pass a non-secret option after the executable:
@@ -136,38 +137,40 @@ also applied to singular `CREDENTIAL`. It is defense in depth, not a sandbox:
 Bash commands retain the Alpha Forge process user's filesystem and network
 permissions and can read any accessible files.
 
-The current `Session` sends registered tool definitions through the OpenAI Chat
-Completions API, records calls and results in its model context, and continues
-the same user turn until the model produces a response without tool calls.
-Completed cross-turn history retains the user prompt and final assistant
-response. A turn stops with an error after 10 model iterations to prevent
-runaway tool loops.
+The current `Session` projects OpenAI Chat Completions messages from its
+transcript, sends registered tool definitions, and continues the same user turn
+until the model produces a response without tool calls. A turn stops with an
+error after 10 tool rounds to prevent runaway tool loops.
 
 Tool result content is bounded before it is added to the model context. One
 result may contain at most 16,000 Unicode characters, and all results requested
-by one assistant iteration may contain at most 32,000 characters in aggregate.
+by one model output may contain at most 32,000 characters in aggregate.
 When multiple results exceed the aggregate limit, Alpha Forge shares the
 available space fairly while leaving results that already fit their share
 unchanged.
 
-An oversized result is replaced by a self-identifying preview containing the
+An oversized result is projected as a self-identifying preview containing the
 beginning and end of the result, the original character count, the truncation
-reason, and the local path of the complete result. Only previewed originals are
-persisted. The default layout is:
+reason, and a stable transcript result reference. The complete raw result and
+the exact versioned cap decision remain in the same self-contained transcript.
+The default layout is:
 
 ```text
-$XDG_DATA_HOME/alpha-forge/<session-id>/tool-results/<tool-call-id>.{txt,json}
+$XDG_DATA_HOME/alpha-forge/transcripts/<session-id>.jsonl
 ```
 
 When `XDG_DATA_HOME` is unset, the base directory is
-`~/.local/share/alpha-forge`. Results that parse as JSON use `.json`; all other
-results use `.txt`. `/clear` creates a new `Session` with a new ID but does not
-delete previous files. An active turn finishes against the session in which it
-started, while queued turns that have not started use the new session.
-Persisted results are not automatically restored or cleaned up. The default
-`file_reader` can consume the `persisted_path` shown in a preview in bounded
-character ranges. The limits and persistence location are built-in policy
-rather than CLI or user-config fields.
+`~/.local/share/alpha-forge`. Each compact JSONL record is appended, flushed,
+and synced before it becomes visible as completed history. New transcript
+directories and files use modes `0700` and `0600`.
+
+`/resume PATH` validates and opens a transcript, rebuilds model/UI history, and
+requeues safely recoverable unfinished turns. It never reruns a tool call whose
+side effect may already have happened: a missing result is recorded as an
+interruption error before the model continues. The session-aware
+`tool_result_reader` tool can consume a preview's `transcript_ref` in bounded
+character ranges. `/resume` and `/clear` require the active turn and prompt
+queue to be idle.
 
 To build a controller with a custom registry:
 
@@ -196,31 +199,70 @@ controller = ChatReplController(config, tool_registry=registry)
 `is_mcp` and `validate_input` are definition-only in this release; MCP
 execution and custom validator invocation are intentionally deferred.
 
-### Conversation history
+### Transcript and history projections
 
-REPL orchestration lives in `alpha_forge.repl_controller`, per-session identity
-and protocol history live in `alpha_forge.session`, and transcript view models
-and rendering logic live in `alpha_forge.ui_state`. The controller exposes the
-current protocol state as `controller.session` and rendering state as
-`controller.ui_state`. A session owns its `Conversation` and coordinates
-tool-result persistence with its ID; the controller owns queueing and replaces
-the session when `/clear` is executed.
+See [the transcript architecture](docs/transcript-architecture.md) for the
+event catalog, layer boundaries, persistence flow, and branch model.
 
-The history panel groups each user turn into one block. Model iterations are
-stored as bundled snapshots so streaming text, tool calls, tool results, and
-intermediate assistant notes share one rendering path.
+`alpha_forge.transcript` owns the versioned event schema and append-only JSONL
+store. Its v3 schema is a flat semantic activity ledger: session starts and
+transitions, user messages, commands and command results, model outputs, raw
+tool results, tool-result limit decisions, and turn failures. A `ModelOutput`
+is atomic and contains its ordered tool calls. Transport chunks, start markers,
+progress updates, and commit markers are not transcript activities.
+
+`alpha_forge.session` is the exclusive protocol-aware writer and owns lifecycle
+and crash recovery. The transcript validates only record structure and
+references. `alpha_forge.model_history.ModelHistoryProjector` and
+`alpha_forge.ui_history.UiHistoryProjector` independently derive model and UI
+facts directly from the ledger; there is no shared reconstructed turn graph or
+second completed-history list. The model projector emits only complete
+protocol history. The UI projector emits flat durable presentation facts, and
+`ChatUiState` groups those facts for display. Small completed values shared by
+these layers, such as tool calls and token usage, live in
+`alpha_forge.models`; streaming state does not leak into the transcript layer.
+
+A complete user message is appended before its work item is queued. Each user
+message records a parent turn ID. Projections select the root-to-head ancestry,
+which establishes branch-capable storage while the current terminal UI still
+presents one selected branch. A completed provider response becomes one model
+output event. Raw tool results, the reproducible limiter decision, and failures
+are separate semantic activities.
+
+Partial assistant text, reasoning, refusals, usage, and function-call arguments
+exist only in a UI-owned mutable draft while the provider stream is open. The
+terminal renders that draft in a conditional tail pane capped at roughly one
+third of the screen; the durable transcript pane remains unchanged and
+independently scrollable. F3 copies only durable transcript history. A failed
+stream discards its draft. Once the stream ends, the UI returns an immutable
+response to the controller, which persists it through `Session` and then asks
+the UI to resync and clear its draft. If the response cannot be persisted, the
+active pane retains it with an explicit unsaved error instead of presenting it
+as transcript history.
+
+The history panel groups flat projected facts by user turn. This remains correct
+when several user messages are submitted while an earlier response streams:
+the projector supplies each model request only completed earlier turns plus its
+own user message, excluding later queued prompts.
 
 Within a turn, tool calls and results are indented and rendered without blank
-lines. Calls appear atomically before execution. All results from one assistant
-iteration are collected before aggregate budgeting; the resulting full values
-or previews then appear in call order. Model text continues streaming whenever
-available. Text from a tool-requesting iteration is retained beneath its tool
-result as an italic cyan `Assistant note`. Separate turns and command notices
-have one blank line between their blocks. When the provider includes token
-usage, the latest model iteration of the latest turn ends with a right-aligned
-summary such as `Total tokens: 1,555 | Prompt cache: 72% reused`. Providers that
-omit cache details still show the total, while raw cached-token counts are not
-displayed.
+lines. Incomplete tool-call IDs, names, and arguments render from the active
+draft. Completed calls become durable before execution starts. Each synchronous
+tool result is appended immediately after that tool returns, while a bounded
+provisional preview appears in the active pane. After every requested tool has
+returned, the durable batch-cap event makes the exact reproducible previews
+visible in call order and clears the active pane.
+
+Slash commands are durable activities too. The source transcript records the
+raw command and its structured result; the UI displays only result messages.
+`/clear` and `/resume` additionally put a transition activity in the
+destination transcript, linking it to the source session and command.
+
+Text from a tool-requesting model output is retained beneath its tool result as an
+italic cyan `Assistant note`. Separate turns and command notices have one blank
+line between their blocks. When the provider includes token usage, the latest
+model output of the latest turn ends with a right-aligned summary such as
+`Total tokens: 1,555 | Prompt cache: 72% reused`.
 
 ## Local secrets
 

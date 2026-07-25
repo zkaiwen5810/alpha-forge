@@ -49,9 +49,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.timeout, 45.5)
 
     def test_default_model(self) -> None:
-        with patch.dict(
-            os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True
-        ):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=True):
             config = Config.from_layers(ConfigSource(), load_env_config())
 
         self.assertEqual(config.model, DEFAULT_MODEL)
@@ -76,11 +74,11 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text(
-                '[openai]\n'
+                "[openai]\n"
                 'api_key = "file-key"\n'
                 'model = "file-model"\n'
                 'base_url = "https://file.example/v1"\n'
-                'timeout = 42.5\n'
+                "timeout = 42.5\n"
             )
             result = load_user_config(path)
         self.assertEqual(
@@ -103,12 +101,7 @@ class ConfigTests(unittest.TestCase):
     def test_load_user_config_ignores_unknown_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
-            path.write_text(
-                '[openai]\n'
-                'foo = "bar"\n'
-                '[other]\n'
-                'x = 1\n'
-            )
+            path.write_text('[openai]\nfoo = "bar"\n[other]\nx = 1\n')
             result = load_user_config(path)
         self.assertEqual(result, ConfigSource())
 
@@ -227,9 +220,7 @@ class ConfigTests(unittest.TestCase):
     # --- load_env_config ---
 
     def test_load_env_config_treats_empty_string_as_unset(self) -> None:
-        with patch.dict(
-            os.environ, {"OPENAI_BASE_URL": ""}, clear=True
-        ):
+        with patch.dict(os.environ, {"OPENAI_BASE_URL": ""}, clear=True):
             result = load_env_config()
         self.assertIsNone(result.base_url)
 
@@ -259,8 +250,7 @@ class ConfigTests(unittest.TestCase):
             xdg.mkdir()
             (xdg / "alpha-forge").mkdir(parents=True)
             (xdg / "alpha-forge" / "config.toml").write_text(
-                '[openai]\napi_key = "file-key"\n'
-                'model = "file-model"\ntimeout = 20\n'
+                '[openai]\napi_key = "file-key"\nmodel = "file-model"\ntimeout = 20\n'
             )
             args = _ns(model="cli-model", timeout=10)
             with patch.dict(

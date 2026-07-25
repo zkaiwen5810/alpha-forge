@@ -3,11 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from alpha_forge.tool_results import (
-    MAX_TOOL_RESULT_CHARS,
-    RawToolResult,
-    ToolResultManager,
-)
+from alpha_forge.tool_results import MAX_TOOL_RESULT_CHARS
 from alpha_forge.tools import (
     MAX_FILE_READ_CHARS,
     ToolExecutionError,
@@ -68,44 +64,11 @@ class FileReaderTests(unittest.TestCase):
                 "file_reader",
                 {"path": str(path), "limit": MAX_FILE_READ_CHARS},
             )
-            message = ToolResultManager(
-                persist_directory=Path(tmp) / "results"
-            ).process(
-                (RawToolResult("call-read", result),),
-                session_id="session",
-            )[0]
 
         self.assertLessEqual(len(result), MAX_TOOL_RESULT_CHARS)
         self.assertEqual(len(_read_content(result)), MAX_FILE_READ_CHARS)
         self.assertIn(f"next_offset: {MAX_FILE_READ_CHARS}", result)
         self.assertIn("eof: false", result)
-        self.assertIsNone(message.preview)
-
-    def test_reads_a_persisted_oversized_tool_result_by_range(self) -> None:
-        full_result = "0123456789" * 100
-        with tempfile.TemporaryDirectory() as tmp:
-            manager = ToolResultManager(
-                persist_directory=Path(tmp),
-                individual_limit=500,
-                aggregate_limit=800,
-            )
-            preview = manager.process(
-                (RawToolResult("call-large", full_result),),
-                session_id="session",
-            )[0]
-            assert preview.preview is not None
-
-            result = self.registry.execute(
-                "file_reader",
-                {
-                    "path": str(preview.preview.persisted_path),
-                    "offset": 410,
-                    "limit": 25,
-                },
-            )
-
-        self.assertEqual(_read_content(result), full_result[410:435])
-        self.assertIn("next_offset: 435", result)
 
     def test_rejects_invalid_ranges_missing_files_and_non_utf8(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

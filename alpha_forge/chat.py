@@ -3,28 +3,23 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, cast
 
 from openai import AsyncOpenAI, OpenAI
 
 from alpha_forge.config import Config
-from alpha_forge.conversation import Message
-
-
-@dataclass(frozen=True)
-class ChatStreamEvent:
-    """A normalized delta or usage update from Chat Completions."""
-
-    type: Literal["text_delta", "tool_call_delta", "usage"]
-    text: str = ""
-    index: int | None = None
-    call_id: str = ""
-    name: str = ""
-    arguments: str = ""
-    prompt_tokens: int | None = None
-    cached_tokens: int | None = None
-    total_tokens: int | None = None
+from alpha_forge.model_messages import Message
+from alpha_forge.streaming import (
+    ModelResponseAccumulator,
+    ReasoningDelta,
+    RefusalDelta,
+    StreamCompleted,
+    StreamEvent,
+    TextDelta,
+    TokenUsage,
+    ToolCallDelta,
+    UsageUpdate,
+)
 
 
 class ChatClient:
@@ -53,7 +48,7 @@ class ChatClient:
         return kwargs
 
     @staticmethod
-    def _usage_field(value: object, name: str) -> Any:
+    def _field(value: object, name: str) -> Any:
         if isinstance(value, Mapping):
             return value.get(name)
         return getattr(value, name, None)
@@ -63,21 +58,21 @@ class ChatClient:
         cls,
         usage: object,
     ) -> tuple[int | None, int | None, int | None] | None:
-        prompt_tokens = cls._usage_field(usage, "prompt_tokens")
+        prompt_tokens = cls._field(usage, "prompt_tokens")
         if prompt_tokens is None:
-            prompt_tokens = cls._usage_field(usage, "input_tokens")
-        total_tokens = cls._usage_field(usage, "total_tokens")
+            prompt_tokens = cls._field(usage, "input_tokens")
+        total_tokens = cls._field(usage, "total_tokens")
         if total_tokens is None:
-            output_tokens = cls._usage_field(usage, "output_tokens")
+            output_tokens = cls._field(usage, "output_tokens")
             if isinstance(prompt_tokens, int) and isinstance(output_tokens, int):
                 total_tokens = prompt_tokens + output_tokens
 
-        prompt_details = cls._usage_field(usage, "prompt_tokens_details")
-        cached_tokens = cls._usage_field(prompt_details, "cached_tokens")
+        prompt_details = cls._field(usage, "prompt_tokens_details")
+        cached_tokens = cls._field(prompt_details, "cached_tokens")
         if cached_tokens is None:
-            cached_tokens = cls._usage_field(usage, "prompt_cache_hit_tokens")
+            cached_tokens = cls._field(usage, "prompt_cache_hit_tokens")
         if cached_tokens is None:
-            cached_tokens = cls._usage_field(usage, "cached_tokens")
+            cached_tokens = cls._field(usage, "cached_tokens")
 
         prompt_tokens = prompt_tokens if isinstance(prompt_tokens, int) else None
         cached_tokens = cached_tokens if isinstance(cached_tokens, int) else None
@@ -89,7 +84,10 @@ class ChatClient:
     def complete(self, messages: list[Message]) -> str:
         response = self.client.chat.completions.create(
             model=self.config.model,
-            messages=[message.to_openai() for message in messages],
+            messages=cast(
+                Any,
+                [message.to_openai() for message in messages],
+            ),
         )
         return response.choices[0].message.content or ""
 
@@ -98,8 +96,8 @@ class ChatClient:
         messages: list[Message],
         *,
         tools: list[dict[str, Any]],
-    ) -> AsyncIterator[ChatStreamEvent]:
-        """Yield normalized text and function-call deltas for one iteration."""
+    ) -> AsyncIterator[StreamEvent]:
+        """Yield normalized deltas for one streamed model response."""
         request: dict[str, Any] = {
             "model": self.config.model,
             "messages": [message.to_openai() for message in messages],
@@ -109,32 +107,70 @@ class ChatClient:
         if tools:
             request["tools"] = tools
         response = await self.async_client.chat.completions.create(**request)
+        accumulator = ModelResponseAccumulator()
+        finish_reason: str | None = None
         async for chunk in response:
+            if chunk.choices:
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if delta.content:
+                    event = TextDelta(delta.content)
+                    accumulator.apply(event)
+                    yield event
+
+                # ``reasoning_content`` is an OpenAI-compatible extension,
+                # not part of the official Chat Completions delta schema.
+                reasoning = self._field(delta, "reasoning_content")
+                if isinstance(reasoning, str) and reasoning:
+                    event = ReasoningDelta(reasoning)
+                    accumulator.apply(event)
+                    yield event
+
+                for tool_call in delta.tool_calls or []:
+                    if tool_call.index is None:
+                        raise RuntimeError("tool-call delta is missing its index")
+                    function = tool_call.function
+                    event = ToolCallDelta(
+                        index=tool_call.index,
+                        call_id=tool_call.id or "",
+                        name=(function.name or "") if function else "",
+                        arguments=((function.arguments or "") if function else ""),
+                    )
+                    accumulator.apply(event)
+                    yield event
+
+                refusal = self._field(delta, "refusal")
+                if isinstance(refusal, str) and refusal:
+                    event = RefusalDelta(refusal)
+                    accumulator.apply(event)
+                    yield event
+
+                encountered_reason = getattr(choice, "finish_reason", None)
+                if encountered_reason is not None:
+                    finish_reason = str(encountered_reason)
+
             usage = getattr(chunk, "usage", None)
             token_usage = self._token_usage(usage) if usage is not None else None
             if token_usage is not None:
                 prompt_tokens, cached_tokens, total_tokens = token_usage
-                yield ChatStreamEvent(
-                    type="usage",
-                    prompt_tokens=prompt_tokens,
-                    cached_tokens=cached_tokens,
-                    total_tokens=total_tokens,
+                event = UsageUpdate(
+                    TokenUsage(
+                        prompt_tokens=prompt_tokens,
+                        cached_tokens=cached_tokens,
+                        total_tokens=total_tokens,
+                    )
                 )
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta.content:
-                yield ChatStreamEvent(type="text_delta", text=delta.content)
-            for tool_call in delta.tool_calls or []:
-                function = tool_call.function
-                yield ChatStreamEvent(
-                    type="tool_call_delta",
-                    index=tool_call.index,
-                    call_id=tool_call.id or "",
-                    name=(function.name or "") if function else "",
-                    arguments=(function.arguments or "") if function else "",
-                )
+                accumulator.apply(event)
+                yield event
+
+        # A finish reason describes why generation stopped; it does not mark
+        # the transport boundary because a later choice-less usage chunk may
+        # still arrive. Emit completion exactly once after clean exhaustion.
+        yield StreamCompleted(accumulator.build(finish_reason))
 
     def list_models(self) -> list[str]:
         response = self.client.models.list()
         return sorted(model.id for model in response.data)
+
+
+__all__ = ["ChatClient"]

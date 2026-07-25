@@ -70,9 +70,7 @@ def _write_atomic(path: Path, content: str) -> None:
     temp_path: Path | None = None
     fd: int | None = None
     try:
-        existing_mode = (
-            stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
-        )
+        existing_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
         fd, temp_name = tempfile.mkstemp(
             prefix=f".{path.name}.",
             suffix=".tmp",
@@ -121,11 +119,7 @@ def _replace(arguments: Mapping[str, Any], path: Path, content: str) -> int:
         raise ToolExecutionError(f"file does not exist: {path}")
     old_text = _string_argument(arguments, "old_text", allow_empty=False)
     expected = arguments.get("expected_replacements", 1)
-    if (
-        isinstance(expected, bool)
-        or not isinstance(expected, int)
-        or expected < 1
-    ):
+    if isinstance(expected, bool) or not isinstance(expected, int) or expected < 1:
         raise ToolExecutionError("expected_replacements must be a positive integer")
     try:
         with path.open("r", encoding="utf-8", newline="") as stream:
