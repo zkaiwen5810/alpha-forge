@@ -1,26 +1,27 @@
-"""Pure, versioned projection policy for transcript-held tool results."""
+"""Pure, session-agnostic editing of tool results for model prompts."""
 
 from __future__ import annotations
 
 import json
 
-from alpha_forge.transcript import (
-    PreviewReason,
-    ToolLimitDecision,
-    ToolResult,
-    ToolResultLimit,
+from alpha_forge.models import (
+    EditedToolResult,
+    PromptEdit,
+    PromptEditDecision,
+    PromptEditReason,
+    RawToolResult,
 )
 
 MAX_TOOL_RESULT_CHARS = 16_000
 MAX_TOOL_RESULTS_CHARS = 32_000
 
 
-class ToolResultBudgetError(RuntimeError):
+class PromptEditBudgetError(RuntimeError):
     """Raised when required preview metadata cannot fit in its budget."""
 
 
-class TranscriptToolResultLimiter:
-    """Record and replay deterministic model/UI result projections."""
+class ToolResultPromptEditor:
+    """Create deterministic bounded representations of raw tool results."""
 
     policy_version = "head_tail_v1"
 
@@ -37,16 +38,10 @@ class TranscriptToolResultLimiter:
         self.individual_limit = individual_limit
         self.aggregate_limit = aggregate_limit
 
-    def apply(
-        self,
-        *,
-        output_id: str,
-        results: tuple[ToolResult, ...],
-    ) -> ToolResultLimit:
+    def edit(self, results: tuple[RawToolResult, ...]) -> PromptEdit:
         decisions = self.decide(results)
-        return ToolResultLimit(
-            output_id=output_id,
-            policy_version="head_tail_v1",
+        return PromptEdit(
+            policy_version=self.policy_version,
             individual_limit=self.individual_limit,
             aggregate_limit=self.aggregate_limit,
             decisions=decisions,
@@ -54,21 +49,20 @@ class TranscriptToolResultLimiter:
 
     def decide(
         self,
-        results: tuple[ToolResult, ...],
-    ) -> tuple[ToolLimitDecision, ...]:
-        """Return deterministic preview decisions without creating an event."""
+        results: tuple[RawToolResult, ...],
+    ) -> tuple[PromptEditDecision, ...]:
         desired = [
             min(len(result.content), self.individual_limit) for result in results
         ]
         allocated = self._water_fill(desired, self.aggregate_limit)
-        decisions: list[ToolLimitDecision] = []
+        decisions: list[PromptEditDecision] = []
         for result, desired_length, allocated_length in zip(
             results,
             desired,
             allocated,
             strict=True,
         ):
-            reason: PreviewReason | None = None
+            reason: PromptEditReason | None = None
             if len(result.content) > allocated_length:
                 reason = self._preview_reason(
                     original_length=len(result.content),
@@ -77,7 +71,7 @@ class TranscriptToolResultLimiter:
                 )
                 self.render(
                     result,
-                    ToolLimitDecision(
+                    PromptEditDecision(
                         result.result_id,
                         result.call_id,
                         allocated_length,
@@ -85,7 +79,7 @@ class TranscriptToolResultLimiter:
                     ),
                 )
             decisions.append(
-                ToolLimitDecision(
+                PromptEditDecision(
                     result.result_id,
                     result.call_id,
                     allocated_length,
@@ -94,13 +88,51 @@ class TranscriptToolResultLimiter:
             )
         return tuple(decisions)
 
+    def render_edit(
+        self,
+        results: tuple[RawToolResult, ...],
+        edit: PromptEdit,
+    ) -> tuple[EditedToolResult, ...]:
+        if [
+            (result.result_id, result.call_id) for result in results
+        ] != [
+            (decision.result_id, decision.call_id)
+            for decision in edit.decisions
+        ]:
+            raise ValueError("prompt edit decisions must match tool-result order")
+        return tuple(
+            EditedToolResult(
+                result_id=result.result_id,
+                call_id=result.call_id,
+                content=self.render(result, decision),
+                failed=result.failed,
+                previewed=decision.reason is not None,
+            )
+            for result, decision in zip(results, edit.decisions, strict=True)
+        )
+
     @staticmethod
     def render(
-        result: ToolResult,
-        decision: ToolLimitDecision,
+        result: RawToolResult,
+        decision: PromptEditDecision,
     ) -> str:
+        if (
+            result.result_id != decision.result_id
+            or result.call_id != decision.call_id
+        ):
+            raise ValueError("prompt edit decision does not match tool result")
+        if decision.allocated_chars < 0:
+            raise ValueError("allocated characters cannot be negative")
         if decision.reason is None:
+            if decision.allocated_chars != len(result.content):
+                raise ValueError(
+                    "unedited result allocation must equal its content length"
+                )
             return result.content
+        if decision.allocated_chars >= len(result.content):
+            raise ValueError(
+                "preview allocation must be shorter than the raw result"
+            )
         prefix = (
             "[alpha-forge tool-result-preview]\n"
             "truncated: true\n"
@@ -113,7 +145,7 @@ class TranscriptToolResultLimiter:
         suffix = "\n--- preview tail ---\n"
         overhead = len(prefix) + len(middle) + len(suffix)
         if overhead > decision.allocated_chars:
-            raise ToolResultBudgetError(
+            raise PromptEditBudgetError(
                 "tool-result budget is too small for required preview metadata "
                 f"({decision.allocated_chars} available, {overhead} required)"
             )
@@ -149,7 +181,7 @@ class TranscriptToolResultLimiter:
         original_length: int,
         desired_length: int,
         allocated_length: int,
-    ) -> PreviewReason:
+    ) -> PromptEditReason:
         individual = original_length > desired_length
         aggregate = allocated_length < desired_length
         if individual and aggregate:
@@ -162,6 +194,6 @@ class TranscriptToolResultLimiter:
 __all__ = [
     "MAX_TOOL_RESULTS_CHARS",
     "MAX_TOOL_RESULT_CHARS",
-    "ToolResultBudgetError",
-    "TranscriptToolResultLimiter",
+    "PromptEditBudgetError",
+    "ToolResultPromptEditor",
 ]

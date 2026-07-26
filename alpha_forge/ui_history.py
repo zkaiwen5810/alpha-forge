@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from alpha_forge.models import TokenUsage, ToolCall
-from alpha_forge.tool_results import TranscriptToolResultLimiter
+from alpha_forge.models import RawToolResult, TokenUsage, ToolCall
+from alpha_forge.prompt_editor import ToolResultPromptEditor
 from alpha_forge.transcript import (
     Command,
     CommandMessage,
@@ -13,7 +13,7 @@ from alpha_forge.transcript import (
     ModelOutput,
     SessionTransition,
     ToolResult,
-    ToolResultLimit,
+    ToolResultEdit,
     Transcript,
     TurnFailure,
     UserMessage,
@@ -92,7 +92,7 @@ class UiHistoryProjector:
         commands: dict[str, Command] = {}
         outputs: dict[str, ModelOutput] = {}
         raw_results: dict[tuple[str, str], tuple[int, ToolResult]] = {}
-        limits: dict[str, ToolResultLimit] = {}
+        edits: dict[str, ToolResultEdit] = {}
 
         for record in self.transcript.records:
             event = record.event
@@ -105,22 +105,27 @@ class UiHistoryProjector:
                     record.sequence,
                     event,
                 )
-            elif isinstance(event, ToolResultLimit):
-                limits[event.output_id] = event
+            elif isinstance(event, ToolResultEdit):
+                edits[event.output_id] = event
 
         projected_results: dict[tuple[str, str], UiToolResult] = {}
-        for output_id, limit in limits.items():
+        for output_id, edit in edits.items():
             output = outputs[output_id]
             if output.turn_id not in selected:
                 continue
-            for decision in limit.decisions:
+            for decision in edit.decisions:
                 sequence, result = raw_results[(output_id, decision.call_id)]
                 projected_results[(output_id, result.call_id)] = UiToolResult(
                     sequence=sequence,
                     output_id=output_id,
                     call_id=result.call_id,
-                    content=TranscriptToolResultLimiter.render(
-                        result,
+                    content=ToolResultPromptEditor.render(
+                        RawToolResult(
+                            result.result_id,
+                            result.call_id,
+                            result.content,
+                            result.failed,
+                        ),
                         decision,
                     ),
                     failed=result.failed,
@@ -201,7 +206,7 @@ class UiHistoryProjector:
         for event in self.transcript.events:
             if isinstance(event, ModelOutput):
                 outputs.setdefault(event.turn_id, []).append(event)
-            elif isinstance(event, ToolResultLimit):
+            elif isinstance(event, ToolResultEdit):
                 limits.add(event.output_id)
             elif isinstance(event, TurnFailure):
                 failures.add(event.turn_id)

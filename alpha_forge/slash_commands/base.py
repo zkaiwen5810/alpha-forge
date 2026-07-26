@@ -4,19 +4,22 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, Protocol
 
-from alpha_forge.chat import ChatClient
-from alpha_forge.config import Config
 from alpha_forge.transcript import CommandMessage
 
 CommandAction = Literal["none", "exit", "clear", "resume"]
 
 
+class ModelCatalog(Protocol):
+    def list_models(self) -> list[str]:
+        """Return model IDs visible to the configured OpenAI client."""
+
+
 @dataclass(frozen=True, slots=True)
 class CommandContext:
-    config: Config
-    chat: ChatClient
+    current_model: str
+    model_catalog: ModelCatalog
     arguments: str = ""
 
 
@@ -77,6 +80,7 @@ class SlashCommandHandler:
 __all__ = [
     "CommandAction",
     "CommandContext",
+    "ModelCatalog",
     "CommandOutcome",
     "ParsedCommand",
     "SlashCommand",

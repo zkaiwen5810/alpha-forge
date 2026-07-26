@@ -13,31 +13,30 @@ from alpha_forge.streaming import (
     ModelResponseAccumulator,
     ReasoningDelta,
     RefusalDelta,
-    StreamCompleted,
     TextDelta,
     ToolCallDelta,
     UsageUpdate,
 )
 from alpha_forge.system_events import (
     AssistantMessageAdded,
-    AssistantMessageAddFailed,
     ExitRequested,
+    InputQueued,
+    InputStarted,
+    ModelResponseCompleted,
     ModelResponseStarted,
+    PersistenceFailed,
     RequestFailed,
-    SessionSelected,
+    SessionView,
+    SessionViewChanged,
     StatusChanged,
     ToolBatchStarted,
-    ToolResultsAddFailed,
     ToolResultsFinalized,
     ToolResultsUpdated,
     ToolStarted,
-    TranscriptUpdated,
 )
-from alpha_forge.tool_results import TranscriptToolResultLimiter
-from alpha_forge.transcript import Transcript
 from alpha_forge.ui_history import (
     UiCommandMessage,
-    UiHistoryProjector,
+    UiHistoryItem,
     UiModelOutput,
     UiToolResult,
     UiTransition,
@@ -67,6 +66,7 @@ class HistoryLine:
 @dataclass(slots=True)
 class ActiveModelResponse:
     turn_id: str
+    output_id: str
     preview: ModelResponseAccumulator = field(default_factory=ModelResponseAccumulator)
     response: ModelResponse | None = None
     persistence_error: str | None = None
@@ -95,28 +95,28 @@ type ActiveState = ActiveModelResponse | ActiveToolBatch
 
 
 class ChatUiState:
-    """Read durable state from a transcript and own only ephemeral UI data."""
+    """Reduce immutable application events into presentation-only state."""
 
-    def __init__(
-        self,
-        transcript: Transcript,
-        *,
-        head_turn_id: str | None = None,
-    ) -> None:
-        self.transcript = transcript
-        self.head_turn_id = head_turn_id
+    def __init__(self, view: SessionView) -> None:
+        self.view = view
+        self.head_turn_id = view.head_turn_id
+        self.history_items: tuple[UiHistoryItem, ...] = view.items
         self.active: ActiveState | None = None
         self.status = "Ready"
+        self.exiting = False
+        self.persistence_error: str | None = None
+        self._queued_inputs: dict[str, str] = {}
         self._cache_key: tuple[int, str | None, str | None] | None = None
         self._transcript_cache: tuple[HistoryLine, ...] = ()
 
     @property
+    def pending_inputs(self) -> list[str]:
+        return list(self._queued_inputs.values())
+
+    @property
     def pending_prompts(self) -> list[str]:
-        active_id = self.active.turn_id if self.active is not None else None
-        return UiHistoryProjector(self.transcript).pending_prompts(
-            head_turn_id=self.head_turn_id,
-            exclude_turn_id=active_id,
-        )
+        """Compatibility name for the terminal's queued-input panel."""
+        return self.pending_inputs
 
     @property
     def has_unsaved_active(self) -> bool:
@@ -130,23 +130,29 @@ class ChatUiState:
 
     def handle(self, event: Event) -> bool:
         """Apply one relevant event and report whether presentation changed."""
-        if isinstance(event, SessionSelected):
-            self.transcript = event.transcript
-            self.head_turn_id = event.head_turn_id
-            self.active = None
+        if isinstance(event, SessionViewChanged):
+            self.view = event.view
+            self.head_turn_id = event.view.head_turn_id
+            self.history_items = event.view.items
+            if event.reset_active:
+                self.active = None
             self._invalidate_transcript()
             self.status = self._queue_status()
-        elif isinstance(event, TranscriptUpdated):
-            self.head_turn_id = event.head_turn_id
-            self._invalidate_transcript()
+        elif isinstance(event, InputQueued):
+            self._queued_inputs[event.item_id] = event.raw
+            self.status = self._queue_status()
+        elif isinstance(event, InputStarted):
+            self._queued_inputs.pop(event.item_id, None)
             self.status = self._queue_status()
         elif isinstance(event, ModelResponseStarted):
-            self.active = ActiveModelResponse(event.turn_id)
+            self.active = ActiveModelResponse(event.turn_id, event.output_id)
             self.status = "Streaming response"
             self._invalidate_transcript()
-        elif isinstance(event, StreamCompleted):
+        elif isinstance(event, ModelResponseCompleted):
             if not isinstance(self.active, ActiveModelResponse):
                 raise RuntimeError("no active model response")
+            if self.active.output_id != event.output_id:
+                raise RuntimeError("completed response does not match active output")
             self.active.response = event.response
             self.status = "Saving response"
         elif isinstance(
@@ -164,14 +170,14 @@ class ChatUiState:
             self.active.preview.apply(event)
             self.status = "Streaming response"
         elif isinstance(event, AssistantMessageAdded):
-            self.head_turn_id = event.head_turn_id
+            if (
+                not isinstance(self.active, ActiveModelResponse)
+                or self.active.output_id != event.output_id
+            ):
+                raise RuntimeError("saved response does not match active output")
             self.active = None
             self._invalidate_transcript()
             self.status = self._queue_status()
-        elif isinstance(event, AssistantMessageAddFailed):
-            if isinstance(self.active, ActiveModelResponse):
-                self.active.persistence_error = event.message
-            self.status = f"Cannot add assistant message: {event.message}"
         elif isinstance(event, ToolBatchStarted):
             self.active = ActiveToolBatch(
                 event.turn_id,
@@ -194,30 +200,30 @@ class ChatUiState:
                 result.call_id: ActiveToolResult(
                     call_id=result.call_id,
                     name=calls[result.call_id].name,
-                    content=TranscriptToolResultLimiter.render(
-                        result,
-                        decision,
-                    ),
+                    content=result.content,
                     failed=result.failed,
-                    previewed=decision.reason is not None,
+                    previewed=result.previewed,
                 )
-                for result, decision in zip(
-                    event.results,
-                    event.decisions,
-                    strict=True,
-                )
+                for result in event.results
             }
             self.active.running_call_id = None
             self.status = "Continuing tools"
         elif isinstance(event, ToolResultsFinalized):
-            self.head_turn_id = event.head_turn_id
+            if (
+                not isinstance(self.active, ActiveToolBatch)
+                or self.active.output_id != event.output_id
+            ):
+                raise RuntimeError("finalized tools do not match active output")
             self.active = None
             self._invalidate_transcript()
             self.status = self._queue_status()
-        elif isinstance(event, ToolResultsAddFailed):
-            if isinstance(self.active, ActiveToolBatch):
+        elif isinstance(event, PersistenceFailed):
+            self.persistence_error = event.message
+            if isinstance(self.active, ActiveModelResponse):
                 self.active.persistence_error = event.message
-            self.status = f"Cannot add tool results: {event.message}"
+            elif isinstance(self.active, ActiveToolBatch):
+                self.active.persistence_error = event.message
+            self.status = f"Cannot persist {event.stage}: {event.message}"
         elif isinstance(event, RequestFailed):
             self.active = None
             self._invalidate_transcript()
@@ -225,14 +231,15 @@ class ChatUiState:
         elif isinstance(event, StatusChanged):
             self.status = event.message
         elif isinstance(event, ExitRequested):
-            self.status = "Exiting after queued responses"
+            self.exiting = True
+            self.status = self._queue_status()
         else:
             return False
         return True
 
     def transcript_lines(self) -> list[HistoryLine]:
         active_turn_id = self.active.turn_id if self.active is not None else None
-        key = (self.transcript.revision, self.head_turn_id, active_turn_id)
+        key = (self.view.revision, self.head_turn_id, active_turn_id)
         if self._cache_key != key:
             self._transcript_cache = tuple(
                 self._render_transcript(active_turn_id=active_turn_id)
@@ -273,9 +280,7 @@ class ChatUiState:
         *,
         active_turn_id: str | None,
     ) -> list[HistoryLine]:
-        items = UiHistoryProjector(self.transcript).items(
-            head_turn_id=self.head_turn_id
-        )
+        items = list(self.history_items)
         users = [item for item in items if isinstance(item, UiUserMessage)]
         outputs = {
             item.output_id: item for item in items if isinstance(item, UiModelOutput)
@@ -616,12 +621,16 @@ class ChatUiState:
         return " | ".join(parts)
 
     def _queue_status(self) -> str:
+        if self.persistence_error is not None:
+            return "Persistence failed; input processing stopped"
+        if self.exiting:
+            return "Exiting after queued inputs"
         pending = self.pending_prompts
         if not pending:
             return "Ready"
         if len(pending) == 1:
-            return "1 prompt queued"
-        return f"{len(pending)} prompts queued"
+            return "1 input queued"
+        return f"{len(pending)} inputs queued"
 
     def _invalidate_transcript(self) -> None:
         self._cache_key = None

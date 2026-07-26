@@ -11,15 +11,14 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal, cast
 from uuid import uuid4
 
-from alpha_forge.models import TokenUsage, ToolCall
+from alpha_forge.models import (
+    PromptEditDecision,
+    TokenUsage,
+    ToolCall,
+)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]{1,120}\Z")
-PreviewReason = Literal[
-    "individual_limit",
-    "aggregate_limit",
-    "individual_and_aggregate_limits",
-]
 CommandLevel = Literal["notice", "error"]
 CommandStatus = Literal["success", "error"]
 TransitionKind = Literal["clear", "resume"]
@@ -108,21 +107,13 @@ class ToolResult:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolLimitDecision:
-    result_id: str
-    call_id: str
-    allocated_chars: int
-    reason: PreviewReason | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ToolResultLimit:
+class ToolResultEdit:
     output_id: str
     policy_version: Literal["head_tail_v1"]
     individual_limit: int
     aggregate_limit: int
-    decisions: tuple[ToolLimitDecision, ...]
-    type: ClassVar[Literal["tool.result_limit"]] = "tool.result_limit"
+    decisions: tuple[PromptEditDecision, ...]
+    type: ClassVar[Literal["tool.result_edit"]] = "tool.result_edit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +131,7 @@ type TranscriptEvent = (
     | CommandResult
     | ModelOutput
     | ToolResult
-    | ToolResultLimit
+    | ToolResultEdit
     | TurnFailure
 )
 
@@ -365,7 +356,7 @@ class Transcript:
         outputs: dict[str, ModelOutput] = {}
         results: dict[str, ToolResult] = {}
         result_calls: set[tuple[str, str]] = set()
-        limits: set[str] = set()
+        edits: set[str] = set()
 
         for index, record in enumerate(self._records):
             if (
@@ -544,15 +535,19 @@ class Transcript:
                     )
                 results[event.result_id] = event
                 result_calls.add(result_call)
-            elif isinstance(event, ToolResultLimit):
+            elif isinstance(event, ToolResultEdit):
                 output = outputs.get(event.output_id)
                 if output is None:
                     raise TranscriptCorruptError(
-                        f"tool limit references unknown output: {event.output_id}"
+                        f"prompt edit references unknown output: {event.output_id}"
                     )
-                if event.output_id in limits:
+                if event.output_id in edits:
                     raise TranscriptCorruptError(
-                        f"duplicate tool limit: {event.output_id}"
+                        f"duplicate prompt edit: {event.output_id}"
+                    )
+                if not output.tool_calls:
+                    raise TranscriptCorruptError(
+                        "prompt edit output did not request tools"
                     )
                 if any(
                     isinstance(value, bool) or not isinstance(value, int) or value <= 0
@@ -561,16 +556,18 @@ class Transcript:
                         event.aggregate_limit,
                     )
                 ):
-                    raise TranscriptCorruptError("tool result limits must be positive")
+                    raise TranscriptCorruptError(
+                        "prompt edit limits must be positive"
+                    )
                 if event.policy_version != "head_tail_v1":
                     raise TranscriptCorruptError(
-                        f"unsupported tool limit policy: {event.policy_version}"
+                        f"unsupported prompt edit policy: {event.policy_version}"
                     )
                 if [decision.call_id for decision in event.decisions] != [
                     call.id for call in output.tool_calls
                 ]:
                     raise TranscriptCorruptError(
-                        "tool limit decisions must match tool-call order"
+                        "prompt edit decisions must match tool-call order"
                     )
                 if any(
                     decision.reason
@@ -583,7 +580,7 @@ class Transcript:
                     for decision in event.decisions
                 ):
                     raise TranscriptCorruptError(
-                        "tool limit contains an invalid preview reason"
+                        "prompt edit contains an invalid preview reason"
                     )
                 if any(
                     decision.result_id not in results
@@ -595,9 +592,56 @@ class Transcript:
                     for decision in event.decisions
                 ):
                     raise TranscriptCorruptError(
-                        "tool limit references an invalid result"
+                        "prompt edit references an invalid result"
                     )
-                limits.add(event.output_id)
+                edited_results = [
+                    results[decision.result_id]
+                    for decision in event.decisions
+                ]
+                if (
+                    any(
+                        decision.allocated_chars > event.individual_limit
+                        or decision.allocated_chars > len(result.content)
+                        for decision, result in zip(
+                            event.decisions,
+                            edited_results,
+                            strict=True,
+                        )
+                    )
+                    or sum(
+                        decision.allocated_chars
+                        for decision in event.decisions
+                    )
+                    > event.aggregate_limit
+                ):
+                    raise TranscriptCorruptError(
+                        "prompt edit exceeds its declared limits"
+                    )
+                for decision, result in zip(
+                    event.decisions,
+                    edited_results,
+                    strict=True,
+                ):
+                    desired = min(
+                        len(result.content),
+                        event.individual_limit,
+                    )
+                    if len(result.content) == decision.allocated_chars:
+                        expected_reason = None
+                    elif (
+                        len(result.content) > desired
+                        and decision.allocated_chars < desired
+                    ):
+                        expected_reason = "individual_and_aggregate_limits"
+                    elif len(result.content) > desired:
+                        expected_reason = "individual_limit"
+                    else:
+                        expected_reason = "aggregate_limit"
+                    if decision.reason != expected_reason:
+                        raise TranscriptCorruptError(
+                            "prompt edit reason does not match its allocation"
+                        )
+                edits.add(event.output_id)
             elif isinstance(event, TurnFailure):
                 if not isinstance(event.error, str):
                     raise TranscriptCorruptError("turn failure error must be a string")
@@ -693,7 +737,7 @@ def _encode_event(event: TranscriptEvent) -> dict[str, Any]:
             "content": event.content,
             "failed": event.failed,
         }
-    if isinstance(event, ToolResultLimit):
+    if isinstance(event, ToolResultEdit):
         return {
             "output_id": event.output_id,
             "policy_version": event.policy_version,
@@ -832,17 +876,17 @@ def _decode_event(event_type: str, payload: dict[str, Any]) -> TranscriptEvent:
             content=_required_str(payload, "content"),
             failed=failed,
         )
-    if event_type == "tool.result_limit":
+    if event_type == "tool.result_edit":
         policy = _required_str(payload, "policy_version")
         if policy != "head_tail_v1":
-            raise ValueError(f"unsupported tool limit policy: {policy}")
+            raise ValueError(f"unsupported prompt edit policy: {policy}")
         raw_decisions = payload.get("decisions")
         if not isinstance(raw_decisions, list):
             raise TypeError("decisions must be an array")
-        decisions: list[ToolLimitDecision] = []
+        decisions: list[PromptEditDecision] = []
         for raw in raw_decisions:
             if not isinstance(raw, dict):
-                raise TypeError("tool limit decision must be an object")
+                raise TypeError("prompt edit decision must be an object")
             reason = raw.get("reason")
             if reason not in (
                 None,
@@ -852,14 +896,14 @@ def _decode_event(event_type: str, payload: dict[str, Any]) -> TranscriptEvent:
             ):
                 raise ValueError(f"invalid preview reason: {reason}")
             decisions.append(
-                ToolLimitDecision(
+                PromptEditDecision(
                     _required_str(raw, "result_id"),
                     _required_str(raw, "call_id"),
                     _required_int(raw, "allocated_chars"),
                     reason,
                 )
             )
-        return ToolResultLimit(
+        return ToolResultEdit(
             output_id=_required_str(payload, "output_id"),
             policy_version="head_tail_v1",
             individual_limit=_required_int(payload, "individual_limit"),
@@ -910,13 +954,12 @@ __all__ = [
     "CommandResult",
     "CommandStatus",
     "ModelOutput",
-    "PreviewReason",
     "SessionStart",
     "SessionTransition",
     "TokenUsage",
-    "ToolLimitDecision",
+    "PromptEditDecision",
     "ToolResult",
-    "ToolResultLimit",
+    "ToolResultEdit",
     "Transcript",
     "TranscriptCorruptError",
     "TranscriptError",

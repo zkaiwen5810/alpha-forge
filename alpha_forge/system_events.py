@@ -1,48 +1,61 @@
-"""Typed system-originated events consumed by presentation state."""
+"""Typed application events consumed by reactive presentation state."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from alpha_forge.events import Event
-from alpha_forge.models import ToolCall
-from alpha_forge.transcript import (
-    ModelOutput,
-    ToolLimitDecision,
-    ToolResult,
-    Transcript,
-)
+from alpha_forge.models import EditedToolResult, ToolCall
+from alpha_forge.streaming import ModelResponse
+from alpha_forge.ui_history import UiHistoryItem
+
+
+@dataclass(frozen=True, slots=True)
+class SessionView:
+    """Immutable durable-history projection published after a WAL commit."""
+
+    session_id: str
+    revision: int
+    head_turn_id: str | None
+    items: tuple[UiHistoryItem, ...]
 
 
 class SystemEvent(Event):
-    """Base for application facts that do not originate in an LLM stream."""
+    """Base for application facts that do not originate in a model stream."""
 
 
 @dataclass(frozen=True, slots=True)
-class SessionSelected(SystemEvent):
-    transcript: Transcript
-    head_turn_id: str | None
+class SessionViewChanged(SystemEvent):
+    view: SessionView
+    reset_active: bool = False
 
 
 @dataclass(frozen=True, slots=True)
-class TranscriptUpdated(SystemEvent):
-    head_turn_id: str | None
+class InputQueued(SystemEvent):
+    item_id: str
+    raw: str
+
+
+@dataclass(frozen=True, slots=True)
+class InputStarted(SystemEvent):
+    item_id: str
 
 
 @dataclass(frozen=True, slots=True)
 class ModelResponseStarted(SystemEvent):
     turn_id: str
+    output_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ModelResponseCompleted(SystemEvent):
+    output_id: str
+    response: ModelResponse
 
 
 @dataclass(frozen=True, slots=True)
 class AssistantMessageAdded(SystemEvent):
-    output: ModelOutput
-    head_turn_id: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class AssistantMessageAddFailed(SystemEvent):
-    message: str
+    output_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,17 +72,17 @@ class ToolStarted(SystemEvent):
 
 @dataclass(frozen=True, slots=True)
 class ToolResultsUpdated(SystemEvent):
-    results: tuple[ToolResult, ...]
-    decisions: tuple[ToolLimitDecision, ...]
+    results: tuple[EditedToolResult, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class ToolResultsFinalized(SystemEvent):
-    head_turn_id: str | None
+    output_id: str
 
 
 @dataclass(frozen=True, slots=True)
-class ToolResultsAddFailed(SystemEvent):
+class PersistenceFailed(SystemEvent):
+    stage: str
     message: str
 
 
@@ -88,19 +101,27 @@ class ExitRequested(SystemEvent):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class ExitReady(SystemEvent):
+    exit_code: int = 0
+
+
 __all__ = [
-    "AssistantMessageAddFailed",
     "AssistantMessageAdded",
+    "ExitReady",
     "ExitRequested",
+    "InputQueued",
+    "InputStarted",
+    "ModelResponseCompleted",
     "ModelResponseStarted",
+    "PersistenceFailed",
     "RequestFailed",
-    "SessionSelected",
+    "SessionView",
+    "SessionViewChanged",
     "StatusChanged",
     "SystemEvent",
     "ToolBatchStarted",
-    "ToolResultsAddFailed",
     "ToolResultsFinalized",
     "ToolResultsUpdated",
     "ToolStarted",
-    "TranscriptUpdated",
 ]

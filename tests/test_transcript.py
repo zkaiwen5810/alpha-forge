@@ -7,18 +7,21 @@ from unittest.mock import patch
 
 from alpha_forge.model_messages import ToolCall
 from alpha_forge.model_history import ModelHistoryProjector
+from alpha_forge.models import RawToolResult
+from alpha_forge.prompt_editor import ToolResultPromptEditor
 from alpha_forge.session import Session
 from alpha_forge.streaming import (
     ModelResponse,
     ModelResponseAccumulator,
     ReasoningDelta,
-    StreamCompleted,
     TextDelta,
     ToolCallDelta,
 )
 from alpha_forge.system_events import (
-    AssistantMessageAddFailed,
+    ModelResponseCompleted,
     ModelResponseStarted,
+    PersistenceFailed,
+    SessionView,
 )
 from alpha_forge.transcript import (
     Command,
@@ -27,7 +30,7 @@ from alpha_forge.transcript import (
     ModelOutput,
     SessionTransition,
     ToolResult,
-    ToolResultLimit,
+    ToolResultEdit,
     Transcript,
     TranscriptCorruptError,
     TranscriptPersistenceError,
@@ -41,6 +44,40 @@ from alpha_forge.ui_history import (
     UiToolResult,
 )
 from alpha_forge.ui_state import ChatUiState
+
+
+def _view(session: Session) -> SessionView:
+    return SessionView(
+        session.session_id,
+        session.transcript.revision,
+        session.head_turn_id,
+        tuple(
+            UiHistoryProjector(session.transcript).items(
+                head_turn_id=session.head_turn_id
+            )
+        ),
+    )
+
+
+def _finalize(
+    session: Session,
+    output_id: str,
+    results: tuple[ToolResult, ...],
+):
+    editor = ToolResultPromptEditor()
+    raw = tuple(
+        RawToolResult(
+            result.result_id,
+            result.call_id,
+            result.content,
+            result.failed,
+        )
+        for result in results
+    )
+    return session.add_prompt_edit(
+        output_id=output_id,
+        edit=editor.edit(raw),
+    )
 
 
 class TranscriptStorageTests(unittest.TestCase):
@@ -60,7 +97,7 @@ class TranscriptStorageTests(unittest.TestCase):
             self.assertEqual(resumed.events, transcript.events)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             rows = [json.loads(line) for line in path.read_text().splitlines()]
-            self.assertTrue(all(row["schema_version"] == 3 for row in rows))
+            self.assertTrue(all(row["schema_version"] == 4 for row in rows))
             self.assertEqual(
                 [row["type"] for row in rows],
                 ["session.start", "user.message", "model.output"],
@@ -106,13 +143,13 @@ class TranscriptStorageTests(unittest.TestCase):
             )
             self.assertFalse(any(row["type"] == "tool.calls" for row in rows))
 
-    def test_resume_rejects_v2_and_corrupt_completed_records(self) -> None:
+    def test_resume_rejects_old_schema_and_corrupt_completed_records(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "old.jsonl"
             path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "sequence": 0,
                         "event_id": "event",
                         "recorded_at": "now",
@@ -175,21 +212,26 @@ class ProjectionTests(unittest.TestCase):
             content="HEAD" + "x" * 20_000 + "TAIL",
             failed=False,
         )
-        limit = session.finalize_tool_results(
-            output_id=output.output_id,
-            results=(raw,),
-        )
+        edit = _finalize(session, output.output_id, (raw,))
 
         messages = ModelHistoryProjector(session.transcript).messages(head_turn_id=turn)
         tool_message = messages[-1]
-        expected = session._limiter.render(raw, limit.decisions[0])
+        expected = ToolResultPromptEditor.render(
+            RawToolResult(
+                raw.result_id,
+                raw.call_id,
+                raw.content,
+                raw.failed,
+            ),
+            edit.decisions[0],
+        )
         self.assertEqual(tool_message.content, expected)  # type: ignore[attr-defined]
         self.assertIn("transcript_ref", expected)
         self.assertTrue(
             any(isinstance(e, ToolResult) for e in session.transcript.events)
         )
         self.assertTrue(
-            any(isinstance(e, ToolResultLimit) for e in session.transcript.events)
+            any(isinstance(e, ToolResultEdit) for e in session.transcript.events)
         )
 
     def test_model_projection_selects_only_root_to_head_ancestry(self) -> None:
@@ -254,7 +296,7 @@ class ProjectionTests(unittest.TestCase):
         self.assertTrue(any(isinstance(item, UiModelOutput) for item in before))
         self.assertFalse(any(isinstance(item, UiToolResult) for item in before))
 
-        session.finalize_tool_results(output_id=output.output_id, results=(raw,))
+        _finalize(session, output.output_id, (raw,))
         after = UiHistoryProjector(session.transcript).items(head_turn_id=turn)
         self.assertTrue(any(isinstance(item, UiToolResult) for item in after))
 
@@ -311,7 +353,7 @@ class SessionProtocolTests(unittest.TestCase):
             content="done",
             failed=False,
         )
-        session.finalize_tool_results(output_id=output.output_id, results=(raw,))
+        _finalize(session, output.output_id, (raw,))
         session.add_assistant_message(
             turn_id=turn,
             response=ModelResponse("finished"),
@@ -343,7 +385,7 @@ class SessionProtocolTests(unittest.TestCase):
         ]
         self.assertEqual(len(results), 2)
         self.assertTrue(all(result.failed for result in results))
-        self.assertIsInstance(session.transcript.events[-1], ToolResultLimit)
+        self.assertIsInstance(session.transcript.events[-1], ToolResultEdit)
 
     def test_session_transition_is_destination_activity(self) -> None:
         source = Session(transcript=Transcript.in_memory(session_id="source"))
@@ -365,8 +407,8 @@ class EphemeralStateTests(unittest.TestCase):
     def test_partial_output_is_ui_only_until_session_persists_response(self) -> None:
         session = Session(transcript=Transcript.in_memory())
         turn = session.submit_user("hello")
-        ui = ChatUiState(session.transcript, head_turn_id=turn)
-        ui.handle(ModelResponseStarted(turn))
+        ui = ChatUiState(_view(session))
+        ui.handle(ModelResponseStarted(turn, "output"))
         ui.handle(ReasoningDelta("thinking"))
         ui.handle(TextDelta("partial"))
         ui.handle(ToolCallDelta(0, "call", "tool", "{"))
@@ -381,12 +423,12 @@ class EphemeralStateTests(unittest.TestCase):
     def test_completed_response_stays_active_on_persistence_failure(self) -> None:
         session = Session(transcript=Transcript.in_memory())
         turn = session.submit_user("hello")
-        ui = ChatUiState(session.transcript, head_turn_id=turn)
+        ui = ChatUiState(_view(session))
         response = ModelResponse("complete", finish_reason="stop")
-        ui.handle(ModelResponseStarted(turn))
+        ui.handle(ModelResponseStarted(turn, "output"))
         ui.handle(TextDelta("complete"))
-        ui.handle(StreamCompleted(response))
-        ui.handle(AssistantMessageAddFailed("disk full"))
+        ui.handle(ModelResponseCompleted("output", response))
+        ui.handle(PersistenceFailed("model output", "disk full"))
 
         self.assertEqual(response.content, "complete")
         self.assertTrue(ui.has_unsaved_active)

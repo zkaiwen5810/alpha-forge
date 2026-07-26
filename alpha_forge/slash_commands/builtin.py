@@ -38,7 +38,7 @@ def _help(_context: CommandContext) -> CommandOutcome:
 
 def _model(context: CommandContext) -> CommandOutcome:
     try:
-        models = context.chat.list_models()
+        models = context.model_catalog.list_models()
     except Exception as exc:
         return CommandOutcome(
             status="error",
@@ -48,7 +48,7 @@ def _model(context: CommandContext) -> CommandOutcome:
     return CommandOutcome(
         messages=tuple(
             CommandMessage(
-                f"{'*' if _is_current_model(model, context.config.model) else ' '} "
+                f"{'*' if _is_current_model(model, context.current_model) else ' '} "
                 f"{model}"
             )
             for model in models

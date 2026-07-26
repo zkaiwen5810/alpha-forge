@@ -102,7 +102,7 @@ mid-response.
 
 The CLI now avoids this class of bug by running a single full-screen
 `prompt_toolkit.application.Application` in `alpha_forge/terminal_ui.py`.
-Conversation history, queued prompts, status text, and the prompt input
+Conversation history, queued inputs, status text, and the prompt input
 are all prompt-toolkit controls in one layout. Background streaming
 updates mutate in-memory UI state and call `Application.invalidate()`;
 they no longer write directly to stdout or move the terminal cursor.

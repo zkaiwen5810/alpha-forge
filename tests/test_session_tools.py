@@ -5,16 +5,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from alpha_forge.config import Config
+from alpha_forge.events import Event
 from alpha_forge.models import ToolCall
-from alpha_forge.repl_controller import ChatReplController, WorkItem
+from alpha_forge.repl_controller import ChatReplController
 from alpha_forge.session import Session
 from alpha_forge.streaming import (
     ModelResponse,
     StreamCompleted,
     TextDelta,
-    TokenUsage,
     ToolCallDelta,
-    UsageUpdate,
 )
 from alpha_forge.tools import Tool, ToolRegistry
 from alpha_forge.transcript import (
@@ -23,16 +22,18 @@ from alpha_forge.transcript import (
     ModelOutput,
     SessionTransition,
     ToolResult,
-    ToolResultLimit,
+    ToolResultEdit,
     Transcript,
     TurnFailure,
+    UserMessage,
 )
+from alpha_forge.ui_state import ChatUiState
 
 
 class ScriptedChat:
     def __init__(self, responses):  # type: ignore[no-untyped-def]
         self.responses = list(responses)
-        self.requests = []
+        self.requests: list[list[dict[str, object]]] = []
 
     async def stream_response(self, messages, *, tools):  # type: ignore[no-untyped-def]
         self.requests.append([message.to_openai() for message in messages])
@@ -45,99 +46,92 @@ class ScriptedChat:
 
 def _completed(
     content: str | None,
-    finish_reason: str,
     *,
-    tool_calls: tuple[ToolCall, ...] = (),
-    usage: TokenUsage | None = None,
+    calls: tuple[ToolCall, ...] = (),
 ) -> StreamCompleted:
-    return StreamCompleted(
-        ModelResponse(
-            content,
-            tool_calls,
-            finish_reason=finish_reason,
-            usage=usage,
-        )
-    )
+    return StreamCompleted(ModelResponse(content, calls))
 
 
-def _controller(chat: ScriptedChat, *, session: Session | None = None):
-    registry = ToolRegistry()
-    registry.register(
-        Tool(
-            name="echo",
-            function=lambda arguments: f"echo:{arguments['text']}",
-            description="echo",
-            prompt="echo",
-            input_schema={
-                "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
-            },
-        )
+def _controller(
+    chat: ScriptedChat,
+    *,
+    session: Session | None = None,
+) -> tuple[ChatReplController, ChatUiState]:
+    registry = ToolRegistry(
+        [
+            Tool(
+                name="echo",
+                function=lambda arguments: f"echo:{arguments['text']}",
+                description="echo",
+                prompt="echo",
+                input_schema={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            )
+        ]
     )
-    return ChatReplController(
+    controller = ChatReplController(
         Config(api_key="test", model="gpt-test"),
         chat=chat,  # type: ignore[arg-type]
         tool_registry=registry,
         session=session or Session(transcript=Transcript.in_memory()),
     )
+    ui = ChatUiState(controller.initial_view)
+    controller.events.subscribe(Event, ui.handle)
+    return controller, ui
+
+
+async def _run(controller: ChatReplController, *inputs: str) -> None:
+    for value in inputs:
+        controller.submit(value)
+    controller.request_exit()
+    await controller.consume()
 
 
 class ControllerToolLoopTests(unittest.TestCase):
-    def test_tool_call_is_persisted_then_executed_then_model_continues(self) -> None:
+    def test_tool_call_is_committed_executed_edited_then_continued(self) -> None:
+        call = ToolCall("call", "echo", '{"text":"hi"}')
         chat = ScriptedChat(
             [
                 [
                     ToolCallDelta(0, "call", "echo", '{"text":"hi"}'),
-                    _completed(
-                        None,
-                        "tool_calls",
-                        tool_calls=(ToolCall("call", "echo", '{"text":"hi"}'),),
-                    ),
+                    _completed(None, calls=(call,)),
                 ],
-                [
-                    TextDelta("done"),
-                    UsageUpdate(TokenUsage(20, 10, 25)),
-                    _completed(
-                        "done",
-                        "stop",
-                        usage=TokenUsage(20, 10, 25),
-                    ),
-                ],
+                [TextDelta("done"), _completed("done")],
             ]
         )
-        controller = _controller(chat)
-        turn = controller.session.submit_user("run")
+        controller, ui = _controller(chat)
 
-        asyncio.run(controller._stream_response(WorkItem("run", turn)))
+        asyncio.run(_run(controller, "run"))
 
         events = controller.session.transcript.events
         output_positions = [
-            index
-            for index, event in enumerate(events)
-            if isinstance(event, ModelOutput)
+            index for index, event in enumerate(events) if isinstance(event, ModelOutput)
         ]
         result_position = next(
             index for index, event in enumerate(events) if isinstance(event, ToolResult)
         )
-        limit_position = next(
+        edit_position = next(
             index
             for index, event in enumerate(events)
-            if isinstance(event, ToolResultLimit)
+            if isinstance(event, ToolResultEdit)
         )
         self.assertLess(output_positions[0], result_position)
-        self.assertLess(result_position, limit_position)
-        self.assertLess(limit_position, output_positions[1])
+        self.assertLess(result_position, edit_position)
+        self.assertLess(edit_position, output_positions[1])
         self.assertEqual(chat.requests[1][-2]["role"], "assistant")
         self.assertEqual(chat.requests[1][-1]["role"], "tool")
-        self.assertIn("Assistant: done", controller.ui_state.transcript_text())
+        self.assertIn("Assistant: done", ui.transcript_text())
 
-    def test_incomplete_tool_call_is_rendered_but_never_executed(self) -> None:
-        chat = ScriptedChat([[ToolCallDelta(0, "call", "echo", '{"text":')]])
-        controller = _controller(chat)
-        turn = controller.session.submit_user("run")
+    def test_incomplete_stream_is_failed_without_executing_tool(self) -> None:
+        controller, _ui = _controller(
+            ScriptedChat([[ToolCallDelta(0, "call", "echo", '{"text":')]])
+        )
 
-        asyncio.run(controller._stream_response(WorkItem("run", turn)))
+        asyncio.run(_run(controller, "run"))
 
         self.assertFalse(
             any(
@@ -152,48 +146,120 @@ class ControllerToolLoopTests(unittest.TestCase):
             )
         )
 
-    def test_completed_response_remains_visible_when_session_add_fails(
-        self,
-    ) -> None:
-        chat = ScriptedChat([[TextDelta("complete"), _completed("complete", "stop")]])
-        controller = _controller(chat)
-        turn = controller.session.submit_user("run")
+    def test_completed_response_remains_visible_on_commit_failure(self) -> None:
+        controller, ui = _controller(
+            ScriptedChat([[TextDelta("complete"), _completed("complete")]])
+        )
 
         with patch.object(
             controller.session,
             "add_assistant_message",
             side_effect=RuntimeError("disk full"),
         ):
-            asyncio.run(controller._stream_response(WorkItem("run", turn)))
+            asyncio.run(_run(controller, "run"))
 
-        self.assertTrue(controller.ui_state.has_unsaved_active)
-        self.assertIn("complete", controller.ui_state.active_text())
-        self.assertIn("disk full", controller.ui_state.active_text())
+        self.assertTrue(ui.has_unsaved_active)
+        self.assertIn("complete", ui.active_text())
+        self.assertIn("disk full", ui.active_text())
+
+    def test_model_commit_failure_prevents_requested_tool_execution(self) -> None:
+        call = ToolCall("call", "echo", '{"text":"never"}')
+        chat = ScriptedChat([[_completed(None, calls=(call,))]])
+        controller, ui = _controller(chat)
+
+        with patch.object(
+            controller.session,
+            "add_assistant_message",
+            side_effect=RuntimeError("disk full"),
+        ):
+            asyncio.run(_run(controller, "run"))
+
+        self.assertEqual(len(chat.requests), 1)
         self.assertFalse(
             any(
-                isinstance(event, ModelOutput)
+                isinstance(event, ToolResult)
                 for event in controller.session.transcript.events
             )
         )
+        self.assertTrue(ui.has_unsaved_active)
 
-    def test_malformed_tool_arguments_become_failed_result(self) -> None:
+    def test_persistence_failure_skips_later_queued_inputs(self) -> None:
+        chat = ScriptedChat([[_completed("unsaved")]])
+        controller, ui = _controller(chat)
+
+        with patch.object(
+            controller.session,
+            "add_assistant_message",
+            side_effect=RuntimeError("disk full"),
+        ):
+            asyncio.run(_run(controller, "first", "must not run"))
+
+        self.assertEqual(len(chat.requests), 1)
+        self.assertFalse(controller.accepting)
+        self.assertTrue(ui.has_unsaved_active)
+        self.assertEqual(
+            ui.status,
+            "Persistence failed; input processing stopped",
+        )
+
+    def test_raw_result_commit_failure_prevents_prompt_edit_and_next_round(
+        self,
+    ) -> None:
+        call = ToolCall("call", "echo", '{"text":"hi"}')
+        chat = ScriptedChat([[_completed(None, calls=(call,))]])
+        controller, ui = _controller(chat)
+
+        with patch.object(
+            controller.session,
+            "record_tool_result",
+            side_effect=RuntimeError("disk full"),
+        ):
+            asyncio.run(_run(controller, "run"))
+
+        self.assertEqual(len(chat.requests), 1)
+        self.assertFalse(
+            any(
+                isinstance(event, ToolResultEdit)
+                for event in controller.session.transcript.events
+            )
+        )
+        self.assertTrue(ui.has_unsaved_active)
+
+    def test_prompt_edit_commit_failure_retains_preview_and_stops_query(
+        self,
+    ) -> None:
+        call = ToolCall("call", "echo", '{"text":"hi"}')
+        chat = ScriptedChat([[_completed(None, calls=(call,))]])
+        controller, ui = _controller(chat)
+
+        with patch.object(
+            controller.session,
+            "add_prompt_edit",
+            side_effect=RuntimeError("disk full"),
+        ):
+            asyncio.run(_run(controller, "run"))
+
+        self.assertEqual(len(chat.requests), 1)
+        self.assertTrue(
+            any(
+                isinstance(event, ToolResult)
+                for event in controller.session.transcript.events
+            )
+        )
+        self.assertTrue(ui.has_unsaved_active)
+        self.assertIn("echo:hi", ui.active_text())
+
+    def test_malformed_arguments_become_failed_raw_result(self) -> None:
+        call = ToolCall("call", "echo", "not json")
         chat = ScriptedChat(
             [
-                [
-                    ToolCallDelta(0, "call", "echo", "not json"),
-                    _completed(
-                        None,
-                        "tool_calls",
-                        tool_calls=(ToolCall("call", "echo", "not json"),),
-                    ),
-                ],
-                [TextDelta("handled"), _completed("handled", "stop")],
+                [_completed(None, calls=(call,))],
+                [_completed("handled")],
             ]
         )
-        controller = _controller(chat)
-        turn = controller.session.submit_user("run")
+        controller, _ui = _controller(chat)
 
-        asyncio.run(controller._stream_response(WorkItem("run", turn)))
+        asyncio.run(_run(controller, "run"))
 
         result = next(
             event
@@ -203,55 +269,16 @@ class ControllerToolLoopTests(unittest.TestCase):
         self.assertTrue(result.failed)
         self.assertIn("error:", result.content)
 
-    def test_tool_limit_persistence_failure_keeps_ephemeral_results(self) -> None:
+    def test_queued_turn_sees_completed_parent_history(self) -> None:
         chat = ScriptedChat(
             [
-                [
-                    ToolCallDelta(0, "call", "echo", '{"text":"hi"}'),
-                    _completed(
-                        None,
-                        "tool_calls",
-                        tool_calls=(ToolCall("call", "echo", '{"text":"hi"}'),),
-                    ),
-                ]
+                [_completed("first answer")],
+                [_completed("second answer")],
             ]
         )
-        controller = _controller(chat)
-        turn = controller.session.submit_user("run")
+        controller, _ui = _controller(chat)
 
-        with patch.object(
-            controller.session,
-            "finalize_tool_results",
-            side_effect=RuntimeError("disk full"),
-        ):
-            asyncio.run(controller._stream_response(WorkItem("run", turn)))
-
-        self.assertTrue(controller.ui_state.has_unsaved_active)
-        self.assertIn("echo:hi", controller.ui_state.active_text())
-        self.assertIn(
-            "tool results not finalized: disk full",
-            controller.ui_state.active_text(),
-        )
-
-    def test_queued_turn_receives_completed_parent_history(self) -> None:
-        chat = ScriptedChat(
-            [
-                [
-                    TextDelta("first answer"),
-                    _completed("first answer", "stop"),
-                ],
-                [
-                    TextDelta("second answer"),
-                    _completed("second answer", "stop"),
-                ],
-            ]
-        )
-        controller = _controller(chat)
-        first = controller.session.submit_user("first")
-        second = controller.session.submit_user("second")
-
-        asyncio.run(controller._stream_response(WorkItem("first", first)))
-        asyncio.run(controller._stream_response(WorkItem("second", second)))
+        asyncio.run(_run(controller, "first", "second"))
 
         self.assertEqual(
             [message["content"] for message in chat.requests[1]],
@@ -259,74 +286,102 @@ class ControllerToolLoopTests(unittest.TestCase):
         )
 
 
-class CommandActivityTests(unittest.TestCase):
-    def test_help_logs_command_and_result(self) -> None:
-        controller = _controller(ScriptedChat([]))
-
-        controller.submit("  /help  ")
-
-        command = next(
-            event
-            for event in controller.session.transcript.events
-            if isinstance(event, Command)
+class UnifiedInputTests(unittest.TestCase):
+    def test_waiting_input_is_not_persisted_until_dequeued(self) -> None:
+        controller, _ui = _controller(
+            ScriptedChat([[_completed("done")]])
         )
-        self.assertEqual(command.raw, "  /help  ")
+
+        controller.submit("waiting")
+
+        self.assertFalse(
+            any(
+                isinstance(event, UserMessage)
+                for event in controller.session.transcript.events
+            )
+        )
+        controller.request_exit()
+        asyncio.run(controller.consume())
+
+    def test_help_is_queued_audited_and_rendered(self) -> None:
+        controller, ui = _controller(ScriptedChat([]))
+
+        asyncio.run(_run(controller, "/help"))
+
+        self.assertTrue(
+            any(
+                isinstance(event, Command)
+                for event in controller.session.transcript.events
+            )
+        )
         self.assertTrue(
             any(
                 isinstance(event, CommandResult)
                 for event in controller.session.transcript.events
             )
         )
-        self.assertIn("/help /model", controller.ui_state.transcript_text())
+        self.assertIn("/help /model", ui.transcript_text())
 
-    def test_unknown_command_is_audited_and_rendered_as_error(self) -> None:
-        controller = _controller(ScriptedChat([]))
-
-        controller.submit("/missing")
-
-        result = next(
-            event
-            for event in controller.session.transcript.events
-            if isinstance(event, CommandResult)
+    def test_prompt_clear_prompt_uses_fifo_session_selection(self) -> None:
+        chat = ScriptedChat(
+            [
+                [_completed("old answer")],
+                [_completed("new answer")],
+            ]
         )
-        self.assertEqual(result.status, "error")
-        self.assertIn("unknown command", controller.ui_state.transcript_text())
-
-    def test_clear_writes_source_audit_and_destination_transition(self) -> None:
-        controller = _controller(ScriptedChat([]))
+        controller, ui = _controller(chat)
         source = controller.session
 
-        controller.submit("/clear")
+        asyncio.run(_run(controller, "old prompt", "/clear", "new prompt"))
 
         self.assertIsNot(controller.session, source)
         self.assertTrue(
-            any(isinstance(event, CommandResult) for event in source.transcript.events)
+            any(
+                isinstance(event, CommandResult)
+                for event in source.transcript.events
+            )
         )
-        transition = next(
-            event
-            for event in controller.session.transcript.events
-            if isinstance(event, SessionTransition)
+        self.assertTrue(
+            any(
+                isinstance(event, SessionTransition)
+                for event in controller.session.transcript.events
+            )
         )
-        self.assertEqual(transition.kind, "clear")
-        self.assertEqual(transition.source_session_id, source.session_id)
+        self.assertNotIn("old prompt", ui.transcript_text())
+        self.assertIn("new prompt", ui.transcript_text())
+        self.assertEqual(chat.requests[1][0]["content"], "new prompt")
 
-    def test_resume_requeues_unanswered_durable_turn(self) -> None:
+    def test_resume_repairs_and_continues_unfinished_turn_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             saved = Session(transcript_path=Path(tmp) / "saved.jsonl")
             turn = saved.submit_user("unfinished")
-            controller = _controller(ScriptedChat([]))
+            controller, _ui = _controller(
+                ScriptedChat([[_completed("recovered")]])
+            )
 
-            controller.submit(f"/resume {saved.transcript_path}")
+            asyncio.run(_run(controller, f"/resume {saved.transcript_path}"))
 
             self.assertEqual(controller.session.head_turn_id, turn)
-            queued = controller.queue.get_nowait()
-            self.assertEqual(queued, WorkItem("unfinished", turn))
             self.assertTrue(
                 any(
-                    isinstance(event, SessionTransition)
+                    isinstance(event, ModelOutput)
                     for event in controller.session.transcript.events
                 )
             )
+
+    def test_exit_stops_accepting_and_runs_after_earlier_input(self) -> None:
+        controller, ui = _controller(
+            ScriptedChat([[_completed("before exit")]])
+        )
+        controller.submit("first")
+        controller.submit("/exit")
+        controller.submit("ignored")
+
+        asyncio.run(controller.consume())
+
+        self.assertFalse(controller.accepting)
+        self.assertIn("before exit", ui.transcript_text())
+        self.assertNotIn("ignored", ui.transcript_text())
 
 
 if __name__ == "__main__":

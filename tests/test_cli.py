@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import contextlib
 import io
@@ -16,6 +17,7 @@ from prompt_toolkit.output import DummyOutput
 
 from alpha_forge.cli import build_parser, main
 from alpha_forge.config import Config
+from alpha_forge.events import Event
 from alpha_forge.repl_controller import ChatReplController
 from alpha_forge.slash_commands import SlashCommandCompleter
 from alpha_forge.streaming import (
@@ -25,11 +27,13 @@ from alpha_forge.streaming import (
     TokenUsage,
 )
 from alpha_forge.system_events import (
+    ExitReady,
     ModelResponseStarted,
-    TranscriptUpdated,
+    SessionViewChanged,
 )
 from alpha_forge.terminal_ui import TerminalChatUi
 from alpha_forge.transcript import CommandMessage
+from alpha_forge.ui_state import ChatUiState
 
 
 @contextlib.contextmanager
@@ -61,8 +65,24 @@ def _capture_run_repl():
 
 
 class CliTests(unittest.TestCase):
-    def _controller(self, chat) -> ChatReplController:  # type: ignore[no-untyped-def]
-        return ChatReplController(Config(api_key="sk-test"), chat=chat)
+    def _controller(  # type: ignore[no-untyped-def]
+        self,
+        chat,
+        *,
+        config: Config | None = None,
+    ) -> ChatReplController:
+        controller = ChatReplController(
+            config or Config(api_key="sk-test"),
+            chat=chat,
+        )
+        state = ChatUiState(controller.initial_view)
+        controller.events.subscribe(Event, state.handle)
+        controller._test_ui_state = state  # type: ignore[attr-defined]
+        return controller
+
+    @staticmethod
+    def _state(controller: ChatReplController) -> ChatUiState:
+        return controller._test_ui_state  # type: ignore[attr-defined,no-any-return]
 
     @staticmethod
     def _record_notice(controller: ChatReplController, text: str) -> None:
@@ -76,7 +96,7 @@ class CliTests(unittest.TestCase):
             status="success",
             messages=(CommandMessage(text),),
         )
-        controller.ui_state.handle(TranscriptUpdated(controller.session.head_turn_id))
+        controller.events.publish(SessionViewChanged(controller.initial_view))
 
     def test_prompt_submits_on_enter(self) -> None:
         class FakeChatClient:
@@ -109,7 +129,7 @@ class CliTests(unittest.TestCase):
         )
         self.assertEqual(completions, [])
         self.assertTrue(ui._has_pending_prompts())
-        self.assertEqual(controller.ui_state.pending_prompts, ["hello"])
+        self.assertEqual(ui.ui_state.pending_inputs, ["hello"])
 
     def test_slash_suggestions_render_in_prompt_subpanel(self) -> None:
         class FakeChatClient:
@@ -221,14 +241,14 @@ class CliTests(unittest.TestCase):
 
         controller = self._controller(FakeChatClient())
         turn_id = controller.session.submit_user("hello")
-        controller.ui_state.handle(ModelResponseStarted(turn_id))
-        controller.ui_state.handle(TextDelta("partial response"))
         with create_pipe_input() as pipe_input:
             ui = TerminalChatUi(
                 controller,
                 input=pipe_input,
                 output=DummyOutput(),
             )
+            controller.events.publish(ModelResponseStarted(turn_id, "output"))
+            controller.events.publish(TextDelta("partial response"))
 
             copied = ui._history_plain_text()
             rendered = ui.history_control.create_content(80, 3)
@@ -438,7 +458,7 @@ class CliTests(unittest.TestCase):
 
         self.assertTrue(keep_text)
         self.assertEqual(ui.input_area.text, "/model")
-        self.assertEqual(controller.ui_state.pending_prompts, [])
+        self.assertEqual(ui.ui_state.pending_inputs, [])
 
     def test_tab_uses_slash_autocomplete(self) -> None:
         class FakeChatClient:
@@ -579,7 +599,10 @@ class CliTests(unittest.TestCase):
             chat = FakeChatClient()
             controller = self._controller(chat)
             exit_codes: list[int] = []
-            controller.request_app_exit = exit_codes.append
+            controller.events.subscribe(
+                ExitReady,
+                lambda event: exit_codes.append(event.exit_code),
+            )
 
             consumer_task = asyncio.create_task(controller.consume())
             controller.submit("hello")
@@ -593,11 +616,12 @@ class CliTests(unittest.TestCase):
 
         controller = asyncio.run(scenario())
 
-        self.assertEqual(controller.ui_state.pending_prompts, [])
-        self.assertIn("reply-to:hello", controller.ui_state.history_text())
-        self.assertIn("reply-to:second", controller.ui_state.history_text())
-        self.assertIn("You: hello", controller.ui_state.history_text())
-        self.assertNotIn("Alpha:", controller.ui_state.history_text())
+        state = self._state(controller)
+        self.assertEqual(state.pending_inputs, [])
+        self.assertIn("reply-to:hello", state.history_text())
+        self.assertIn("reply-to:second", state.history_text())
+        self.assertIn("You: hello", state.history_text())
+        self.assertNotIn("Alpha:", state.history_text())
 
     def test_user_messages_use_distinct_history_style(self) -> None:
         class FakeChatClient:
@@ -708,8 +732,9 @@ class CliTests(unittest.TestCase):
 
         controller = asyncio.run(scenario())
 
-        self.assertEqual(controller.ui_state.pending_prompts, [])
-        self.assertIn("request failed: boom", controller.ui_state.history_text())
+        state = self._state(controller)
+        self.assertEqual(state.pending_inputs, [])
+        self.assertIn("request failed: boom", state.history_text())
 
     def test_parser_does_not_expose_system_option(self) -> None:
         help_text = build_parser().format_help()
@@ -746,12 +771,14 @@ class CliTests(unittest.TestCase):
             def list_models(self) -> list[str]:
                 return ["gpt-other", "gpt-test"]
 
-        controller = ChatReplController(
-            Config(api_key="sk-test", model="gpt-test"),
-            chat=FakeChatClient(),
+        controller = self._controller(
+            FakeChatClient(),
+            config=Config(api_key="sk-test", model="gpt-test"),
         )
         controller.submit("/model")
-        output = controller.ui_state.history_text()
+        controller.request_exit()
+        asyncio.run(controller.consume())
+        output = self._state(controller).history_text()
 
         self.assertIn("  gpt-other", output)
         self.assertIn("* gpt-test", output)
@@ -765,12 +792,14 @@ class CliTests(unittest.TestCase):
             def list_models(self) -> list[str]:
                 return ["openai/gpt-4o"]
 
-        controller = ChatReplController(
-            Config(api_key="sk-test", model="gpt-4o"),
-            chat=FakeChatClient(),
+        controller = self._controller(
+            FakeChatClient(),
+            config=Config(api_key="sk-test", model="gpt-4o"),
         )
         controller.submit("/model")
-        output = controller.ui_state.history_text()
+        controller.request_exit()
+        asyncio.run(controller.consume())
+        output = self._state(controller).history_text()
 
         self.assertIn("* openai/gpt-4o", output)
 

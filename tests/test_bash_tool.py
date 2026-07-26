@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import signal
@@ -8,12 +9,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from alpha_forge.config import Config
 from alpha_forge.model_messages import ToolCall
-from alpha_forge.repl_controller import ChatReplController
+from alpha_forge.models import RawToolResult
+from alpha_forge.prompt_editor import ToolResultPromptEditor
 from alpha_forge.session import Session
 from alpha_forge.streaming import ModelResponse
-from alpha_forge.tool_results import TranscriptToolResultLimiter
+from alpha_forge.tool_execution import ToolExecutor
 from alpha_forge.tools import (
     DEFAULT_BASH_TIMEOUT_SECONDS,
     MAX_BASH_TIMEOUT_SECONDS,
@@ -125,22 +126,24 @@ class BashToolTests(unittest.TestCase):
         )
         self.assertEqual(_section(result, "stderr"), "")
 
-    def test_nonzero_exit_becomes_failed_controller_tool_result(self) -> None:
-        controller = ChatReplController(Config(api_key="sk-test"))
-
-        result, failed = controller._execute_tool_call(
-            ToolCall(
-                "call-bash",
-                "bash",
-                json.dumps({"cmd": "printf output; printf problem >&2; exit 7"}),
+    def test_nonzero_exit_becomes_failed_executor_result(self) -> None:
+        executed = asyncio.run(
+            ToolExecutor(self.registry).execute(
+                ToolCall(
+                    "call-bash",
+                    "bash",
+                    json.dumps(
+                        {"cmd": "printf output; printf problem >&2; exit 7"}
+                    ),
+                )
             )
         )
 
-        self.assertTrue(failed)
-        self.assertTrue(result.startswith("error: [alpha-forge bash]"))
-        self.assertIn("exit_code: 7", result)
-        self.assertIn("--- stdout ---\noutput", result)
-        self.assertIn("--- stderr ---\nproblem", result)
+        self.assertTrue(executed.failed)
+        self.assertTrue(executed.content.startswith("error: [alpha-forge bash]"))
+        self.assertIn("exit_code: 7", executed.content)
+        self.assertIn("--- stdout ---\noutput", executed.content)
+        self.assertIn("--- stderr ---\nproblem", executed.content)
 
     def test_timeout_returns_failure_without_waiting_for_command(self) -> None:
         started = time.monotonic()
@@ -200,13 +203,7 @@ class BashToolTests(unittest.TestCase):
             {"cmd": "printf 'x%.0s' {1..20000}"},
         )
         stdout_offset = result.index("--- stdout ---\n") + len("--- stdout ---\n")
-        session = Session(
-            transcript=None,
-            tool_result_limiter=TranscriptToolResultLimiter(
-                individual_limit=500,
-                aggregate_limit=800,
-            ),
-        )
+        session = Session()
         turn_id = session.submit_user("run")
         output = session.add_assistant_message(
             turn_id=turn_id,
@@ -221,9 +218,22 @@ class BashToolTests(unittest.TestCase):
             content=result,
             failed=False,
         )
-        session.finalize_tool_results(
+        editor = ToolResultPromptEditor(
+            individual_limit=500,
+            aggregate_limit=800,
+        )
+        session.add_prompt_edit(
             output_id=output.output_id,
-            results=(raw,),
+            edit=editor.edit(
+                (
+                    RawToolResult(
+                        raw.result_id,
+                        raw.call_id,
+                        raw.content,
+                        raw.failed,
+                    ),
+                )
+            ),
         )
 
         read_result = session.read_tool_result(

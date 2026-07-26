@@ -53,6 +53,10 @@ class ToolRegistry:
         """Return model-facing OpenAI function definitions."""
         return [tool.to_openai() for tool in self._tools.values()]
 
+    def copy(self) -> ToolRegistry:
+        """Return an independent registry with the same tool definitions."""
+        return ToolRegistry(list(self._tools.values()))
+
     def execute(self, name_or_alias: str, arguments: Mapping[str, Any]) -> str:
         """Execute one tool call and normalize its result to text.
 

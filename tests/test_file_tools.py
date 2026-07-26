@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from alpha_forge.tool_results import MAX_TOOL_RESULT_CHARS
+from alpha_forge.prompt_editor import MAX_TOOL_RESULT_CHARS
 from alpha_forge.tools import (
     MAX_FILE_READ_CHARS,
     ToolExecutionError,

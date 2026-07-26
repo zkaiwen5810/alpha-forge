@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from alpha_forge.tool_results import MAX_TOOL_RESULT_CHARS
+from alpha_forge.prompt_editor import MAX_TOOL_RESULT_CHARS
 from alpha_forge.tools.base import Tool, ToolExecutionError
 
 # Keep enough room for range metadata and for several ordinary reads to share

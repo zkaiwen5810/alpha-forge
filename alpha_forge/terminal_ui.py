@@ -24,8 +24,11 @@ from prompt_toolkit.output.base import Output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
+from alpha_forge.events import Event
 from alpha_forge.repl_controller import ChatReplController
 from alpha_forge.slash_commands import SLASH_COMMANDS
+from alpha_forge.system_events import ExitReady
+from alpha_forge.ui_state import ChatUiState
 
 
 class HistoryControl(UIControl):
@@ -60,6 +63,7 @@ class TerminalChatUi:
         output: Output | None = None,
     ) -> None:
         self.controller = controller
+        self.ui_state = ChatUiState(controller.initial_view)
         self._history_follow_tail = True
         self._history_scroll_offset = 0
         self._history_total_lines = 1
@@ -116,12 +120,10 @@ class TerminalChatUi:
             input=input,
             output=output,
         )
-        # Wire controller events back into this prompt-toolkit view. The
-        # controller owns orchestration and publishes its view model through
-        # ``ui_state``; this class owns widgets and app shutdown. These hooks
-        # keep prompt-toolkit out of the controller and headless tests.
-        self.controller.request_redraw = self.refresh
-        self.controller.request_app_exit = self.exit
+        self._event_subscription = self.controller.events.subscribe(
+            Event,
+            self._handle_application_event,
+        )
         self.refresh()
 
     async def run_async(self) -> int:
@@ -131,7 +133,7 @@ class TerminalChatUi:
 
     def refresh(self) -> None:
         """Refresh widget text and ask prompt-toolkit to redraw the screen."""
-        self._set_text(self.pending_area, self.controller.ui_state.render_pending())
+        self._set_text(self.pending_area, self.ui_state.render_pending())
         self._set_text(
             self.slash_suggestions_area,
             self._render_slash_suggestions(),
@@ -170,7 +172,7 @@ class TerminalChatUi:
                     HSplit(
                         [
                             Window(
-                                FormattedTextControl(" Queued Prompts"),
+                                FormattedTextControl(" Queued Inputs"),
                                 height=1,
                                 style="class:section-title",
                             ),
@@ -197,7 +199,7 @@ class TerminalChatUi:
         )
 
     def _has_pending_prompts(self) -> bool:
-        return bool(self.controller.ui_state.pending_prompts)
+        return bool(self.ui_state.pending_inputs)
 
     def _should_show_slash_suggestions(self) -> bool:
         text = self.input_area.text
@@ -263,7 +265,7 @@ class TerminalChatUi:
         width: int,
     ) -> list[StyleAndTextTuples]:
         fragments: list[StyleAndTextTuples] = []
-        for line in self.controller.ui_state.history_lines():
+        for line in self.ui_state.history_lines():
             style = self._history_line_style(line.role)
             text = (
                 line.text.rjust(width)
@@ -303,7 +305,7 @@ class TerminalChatUi:
     def _status_text(self) -> str:
         """FormattedTextControl callback that recomputes the status bar text."""
         mouse_mode = "mouse-scroll" if self._mouse_enabled else "copy-select"
-        status = self._ui_status or self.controller.ui_state.status
+        status = self._ui_status or self.ui_state.status
         return (
             f" Alpha Forge | {self.controller.config.model} | "
             f"{status} | {mouse_mode} | F2 toggle"
@@ -370,7 +372,14 @@ class TerminalChatUi:
             self.app.invalidate()
 
     def _history_plain_text(self) -> str:
-        return self.controller.ui_state.transcript_text()
+        return self.ui_state.transcript_text()
+
+    def _handle_application_event(self, event: Event) -> None:
+        changed = self.ui_state.handle(event)
+        if isinstance(event, ExitReady):
+            self.exit(event.exit_code)
+        if changed:
+            self.refresh()
 
     def _route_scroll_events_to_history(  # type: ignore[no-untyped-def]
         self,

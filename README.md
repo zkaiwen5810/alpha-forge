@@ -137,10 +137,10 @@ also applied to singular `CREDENTIAL`. It is defense in depth, not a sandbox:
 Bash commands retain the Alpha Forge process user's filesystem and network
 permissions and can read any accessible files.
 
-The current `Session` projects OpenAI Chat Completions messages from its
-transcript, sends registered tool definitions, and continues the same user turn
-until the model produces a response without tool calls. A turn stops with an
-error after 10 tool rounds to prevent runaway tool loops.
+The stateless `QueryEngine` receives explicit OpenAI Chat Completions messages,
+tool definitions, and a tool executor. It continues its prompt-local loop until
+the model produces a response without tool calls. It retains no session or
+transcript reference, and a query stops with an error after 10 tool rounds.
 
 Tool result content is bounded before it is added to the model context. One
 result may contain at most 16,000 Unicode characters, and all results requested
@@ -152,7 +152,8 @@ unchanged.
 An oversized result is projected as a self-identifying preview containing the
 beginning and end of the result, the original character count, the truncation
 reason, and a stable transcript result reference. The complete raw result and
-the exact versioned cap decision remain in the same self-contained transcript.
+the exact versioned prompt-edit decision remain in the same self-contained
+transcript.
 The default layout is:
 
 ```text
@@ -169,8 +170,8 @@ requeues safely recoverable unfinished turns. It never reruns a tool call whose
 side effect may already have happened: a missing result is recorded as an
 interruption error before the model continues. The session-aware
 `tool_result_reader` tool can consume a preview's `transcript_ref` in bounded
-character ranges. `/resume` and `/clear` require the active turn and prompt
-queue to be idle.
+character ranges. `/resume` and `/clear` share the input FIFO, so they run
+after earlier work and select the session used by later queued inputs.
 
 To build a controller with a custom registry:
 
@@ -205,9 +206,9 @@ See [the transcript architecture](docs/transcript-architecture.md) for the
 event catalog, layer boundaries, persistence flow, and branch model.
 
 `alpha_forge.transcript` owns the versioned event schema and append-only JSONL
-store. Its v3 schema is a flat semantic activity ledger: session starts and
+store. Its v4 schema is a flat semantic activity ledger: session starts and
 transitions, user messages, commands and command results, model outputs, raw
-tool results, tool-result limit decisions, and turn failures. A `ModelOutput`
+tool results, prompt-edit decisions, and turn failures. A `ModelOutput`
 is atomic and contains its ordered tool calls. Transport chunks, start markers,
 progress updates, and commit markers are not transcript activities.
 
@@ -222,23 +223,25 @@ protocol history. The UI projector emits flat durable presentation facts, and
 these layers, such as tool calls and token usage, live in
 `alpha_forge.models`; streaming state does not leak into the transcript layer.
 
-A complete user message is appended before its work item is queued. Each user
-message records a parent turn ID. Projections select the root-to-head ancestry,
-which establishes branch-capable storage while the current terminal UI still
-presents one selected branch. A completed provider response becomes one model
-output event. Raw tool results, the reproducible limiter decision, and failures
-are separate semantic activities.
+All prompts and slash commands use one in-memory FIFO. An item is appended to
+the then-current session immediately before it is processed; waiting items are
+not durable. This lets `/clear` and `/resume` deterministically select the
+session used by later queued inputs. Each user message records a parent turn
+ID. Projections select the root-to-head ancestry, which establishes
+branch-capable storage while the current terminal UI still presents one
+selected branch.
 
 Partial assistant text, reasoning, refusals, usage, and function-call arguments
 exist only in a UI-owned mutable draft while the provider stream is open. The
 terminal renders that draft in a conditional tail pane capped at roughly one
 third of the screen; the durable transcript pane remains unchanged and
 independently scrollable. F3 copies only durable transcript history. A failed
-stream discards its draft. Once the stream ends, the UI returns an immutable
-response to the controller, which persists it through `Session` and then asks
-the UI to resync and clear its draft. If the response cannot be persisted, the
-active pane retains it with an explicit unsaved error instead of presenting it
-as transcript history.
+stream discards its draft. Once the stream ends, the query emits an immutable
+response. The controller first exposes it as ephemeral presentation state,
+commits it through `Session`, then publishes a new immutable session view. If
+the response cannot be persisted, the query stops and the active pane retains
+it with an explicit unsaved error. Input processing also stops at that WAL
+failure so later queued work cannot run from state that was never durable.
 
 The history panel groups flat projected facts by user turn. This remains correct
 when several user messages are submitted while an earlier response streams:
@@ -247,14 +250,15 @@ own user message, excluding later queued prompts.
 
 Within a turn, tool calls and results are indented and rendered without blank
 lines. Incomplete tool-call IDs, names, and arguments render from the active
-draft. Completed calls become durable before execution starts. Each synchronous
-tool result is appended immediately after that tool returns, while a bounded
-provisional preview appears in the active pane. After every requested tool has
-returned, the durable batch-cap event makes the exact reproducible previews
+draft. Completed model outputs become durable before execution starts. Each
+raw tool result is appended immediately after that tool returns, while a
+bounded provisional preview appears in the active pane. After every requested
+tool has returned, `tool.result_edit` makes the exact reproducible previews
 visible in call order and clears the active pane.
 
-Slash commands are durable activities too. The source transcript records the
-raw command and its structured result; the UI displays only result messages.
+Slash commands are durable activities too and share the same FIFO as prompts.
+The source transcript records the raw command and its structured result; the UI
+displays only result messages.
 `/clear` and `/resume` additionally put a transition activity in the
 destination transcript, linking it to the source session and command.
 

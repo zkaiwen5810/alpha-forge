@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from alpha_forge.model_history import ModelHistoryProjector
 from alpha_forge.model_messages import Message
-from alpha_forge.streaming import ModelResponse
-from alpha_forge.tool_results import (
+from alpha_forge.models import PromptEdit, RawToolResult
+from alpha_forge.prompt_editor import (
     MAX_TOOL_RESULT_CHARS,
-    TranscriptToolResultLimiter,
+    ToolResultPromptEditor,
 )
+from alpha_forge.streaming import ModelResponse
 from alpha_forge.transcript import (
     Command,
     CommandMessage,
@@ -20,14 +22,16 @@ from alpha_forge.transcript import (
     CommandStatus,
     ModelOutput,
     SessionTransition,
-    ToolLimitDecision,
     ToolResult,
-    ToolResultLimit,
+    ToolResultEdit,
     Transcript,
     TransitionKind,
     TurnFailure,
     UserMessage,
 )
+
+if TYPE_CHECKING:
+    from alpha_forge.query import QueryEvent
 
 DEFAULT_SYSTEM_PROMPT = "You are Alpha Forge, a concise and helpful assistant."
 
@@ -52,7 +56,6 @@ class Session:
         self,
         *,
         system_prompt: str | None = DEFAULT_SYSTEM_PROMPT,
-        tool_result_limiter: TranscriptToolResultLimiter | None = None,
         session_id: str | None = None,
         transcript: Transcript | None = None,
         transcript_path: Path | None = None,
@@ -68,20 +71,14 @@ class Session:
             session_id=session_id,
             path=transcript_path,
         )
-        self._limiter = tool_result_limiter or TranscriptToolResultLimiter()
         self._head_turn_id = self._latest_turn_id()
 
     @classmethod
     def resume(
         cls,
         path: Path,
-        *,
-        tool_result_limiter: TranscriptToolResultLimiter | None = None,
     ) -> Session:
-        return cls(
-            transcript=Transcript.resume(path),
-            tool_result_limiter=tool_result_limiter,
-        )
+        return cls(transcript=Transcript.resume(path))
 
     @property
     def session_id(self) -> str:
@@ -161,7 +158,7 @@ class Session:
             raise ValueError(f"unknown model output: {output_id}")
         if not output.tool_calls:
             raise RuntimeError("model output did not request tools")
-        if self._tool_limit(output_id) is not None:
+        if self._tool_edit(output_id) is not None:
             raise RuntimeError("tool-result batch is already finalized")
         result = ToolResult(
             result_id=result_id or uuid4().hex,
@@ -173,15 +170,32 @@ class Session:
         self.transcript.append(result)
         return result
 
-    def finalize_tool_results(
+    def record_tool_result(
         self,
         *,
         output_id: str,
-        results: tuple[ToolResult, ...],
-    ) -> ToolResultLimit:
+        result: RawToolResult,
+    ) -> ToolResult:
+        return self.add_tool_result(
+            output_id=output_id,
+            call_id=result.call_id,
+            content=result.content,
+            failed=result.failed,
+            result_id=result.result_id,
+        )
+
+    def add_prompt_edit(
+        self,
+        *,
+        output_id: str,
+        edit: PromptEdit,
+    ) -> ToolResultEdit:
         output = self._model_output(output_id)
         if output is None:
             raise ValueError(f"unknown model output: {output_id}")
+        if not output.tool_calls:
+            raise RuntimeError("model output did not request tools")
+        results = self._results_for_output(output_id)
         expected = [call.id for call in output.tool_calls]
         actual = [result.call_id for result in results]
         if actual != expected:
@@ -190,18 +204,69 @@ class Session:
             )
         if any(result.output_id != output_id for result in results):
             raise RuntimeError("tool results belong to another model output")
-        event = self._limiter.apply(
+        if [decision.call_id for decision in edit.decisions] != expected:
+            raise RuntimeError("prompt edit decisions must match tool-call order")
+        if [decision.result_id for decision in edit.decisions] != [
+            result.result_id for result in results
+        ]:
+            raise RuntimeError("prompt edit decisions must match raw results")
+        raw = tuple(
+            RawToolResult(
+                result.result_id,
+                result.call_id,
+                result.content,
+                result.failed,
+            )
+            for result in results
+        )
+        expected_edit = ToolResultPromptEditor(
+            individual_limit=edit.individual_limit,
+            aggregate_limit=edit.aggregate_limit,
+        ).edit(raw)
+        if edit != expected_edit:
+            raise RuntimeError(
+                "prompt edit does not match its declared policy and limits"
+            )
+        event = ToolResultEdit(
             output_id=output_id,
-            results=results,
+            policy_version=edit.policy_version,
+            individual_limit=edit.individual_limit,
+            aggregate_limit=edit.aggregate_limit,
+            decisions=edit.decisions,
         )
         self.transcript.append(event)
         return event
 
-    def provisional_tool_decisions(
+    def apply_query_event(
         self,
-        results: tuple[ToolResult, ...],
-    ) -> tuple[ToolLimitDecision, ...]:
-        return self._limiter.decide(results)
+        *,
+        turn_id: str,
+        event: QueryEvent,
+    ) -> ModelOutput | ToolResult | ToolResultEdit | None:
+        """Commit one durable query fact; ignore ephemeral query events."""
+        from alpha_forge.query import (
+            ModelRoundCompleted,
+            ToolResultProduced,
+            ToolResultsEdited,
+        )
+
+        if isinstance(event, ModelRoundCompleted):
+            return self.add_assistant_message(
+                turn_id=turn_id,
+                response=event.response,
+                output_id=event.output_id,
+            )
+        if isinstance(event, ToolResultProduced):
+            return self.record_tool_result(
+                output_id=event.output_id,
+                result=event.result,
+            )
+        if isinstance(event, ToolResultsEdited):
+            return self.add_prompt_edit(
+                output_id=event.output_id,
+                edit=event.edit,
+            )
+        return None
 
     def fail_turn(self, turn_id: str, message: str) -> TurnFailure:
         if self._user_message(turn_id) is None:
@@ -256,8 +321,13 @@ class Session:
         self.transcript.append(event)
         return event
 
-    def recover_unfinished_turns(self) -> list[PendingTurn]:
+    def recover_unfinished_turns(
+        self,
+        *,
+        prompt_editor: ToolResultPromptEditor | None = None,
+    ) -> list[PendingTurn]:
         """Repair interrupted tool batches and return branch work to requeue."""
+        editor = prompt_editor or ToolResultPromptEditor()
         pending: list[PendingTurn] = []
         for turn in self._ancestry(self._head_turn_id):
             if self._turn_failed(turn.turn_id):
@@ -269,7 +339,7 @@ class Session:
             latest = outputs[-1]
             if not latest.tool_calls:
                 continue
-            if self._tool_limit(latest.output_id) is None:
+            if self._tool_edit(latest.output_id) is None:
                 results = self._results_for_output(latest.output_id)
                 by_call = {result.call_id: result for result in results}
                 ordered: list[ToolResult] = []
@@ -286,9 +356,18 @@ class Session:
                             failed=True,
                         )
                     ordered.append(result)
-                self.finalize_tool_results(
+                raw = tuple(
+                    RawToolResult(
+                        result.result_id,
+                        result.call_id,
+                        result.content,
+                        result.failed,
+                    )
+                    for result in ordered
+                )
+                self.add_prompt_edit(
                     output_id=latest.output_id,
-                    results=tuple(ordered),
+                    edit=editor.edit(raw),
                 )
             pending.append(PendingTurn(turn.turn_id, turn.content))
         return pending
@@ -320,13 +399,7 @@ class Session:
         )
 
     def fresh(self) -> Session:
-        return Session(
-            system_prompt=self.transcript.system_prompt,
-            tool_result_limiter=TranscriptToolResultLimiter(
-                individual_limit=self._limiter.individual_limit,
-                aggregate_limit=self._limiter.aggregate_limit,
-            ),
-        )
+        return Session(system_prompt=self.transcript.system_prompt)
 
     def _assert_model_output_allowed(self, turn_id: str) -> None:
         if self._user_message(turn_id) is None:
@@ -339,7 +412,7 @@ class Session:
         latest = outputs[-1]
         if not latest.tool_calls:
             raise RuntimeError("turn already has a terminal model output")
-        if self._tool_limit(latest.output_id) is None:
+        if self._tool_edit(latest.output_id) is None:
             raise RuntimeError(
                 "cannot continue before all requested tools are finalized"
             )
@@ -385,12 +458,12 @@ class Session:
             if isinstance(event, ToolResult) and event.output_id == output_id
         ]
 
-    def _tool_limit(self, output_id: str) -> ToolResultLimit | None:
+    def _tool_edit(self, output_id: str) -> ToolResultEdit | None:
         return next(
             (
                 event
                 for event in self.transcript.events
-                if isinstance(event, ToolResultLimit) and event.output_id == output_id
+                if isinstance(event, ToolResultEdit) and event.output_id == output_id
             ),
             None,
         )
