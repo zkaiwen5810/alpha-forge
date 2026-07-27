@@ -60,7 +60,7 @@ class PromptEdit:
 
 @dataclass(frozen=True, slots=True)
 class EditedToolResult:
-    """Bounded tool result ready to be placed in a model prompt or UI."""
+    """Bounded tool result produced by the model-facing prompt policy."""
 
     result_id: str
     call_id: str

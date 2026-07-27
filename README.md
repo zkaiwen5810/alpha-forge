@@ -142,12 +142,15 @@ tool definitions, and a tool executor. It continues its prompt-local loop until
 the model produces a response without tool calls. It retains no session or
 transcript reference, and a query stops with an error after 10 tool rounds.
 
-Tool result content is bounded before it is added to the model context. One
-result may contain at most 16,000 Unicode characters, and all results requested
-by one model output may contain at most 32,000 characters in aggregate.
-When multiple results exceed the aggregate limit, Alpha Forge shares the
-available space fairly while leaving results that already fit their share
-unchanged.
+At the beginning of every query iteration, a prompt-editor strategy constructs
+the exact messages for the next OpenAI request. Raw tool results remain
+unmodified in application-only tool messages until this pre-request boundary.
+For an interrupted exchange, a missing-result policy first creates durable
+failure results for calls without a recorded result. The default model-facing
+policy then bounds one result to at most 16,000 Unicode characters and one
+model output's results to at most 32,000 characters in aggregate. When
+multiple results exceed the aggregate limit, Alpha Forge shares the available
+space fairly while leaving results that already fit their share unchanged.
 
 An oversized result is projected as a self-identifying preview containing the
 beginning and end of the result, the original character count, the truncation
@@ -167,8 +170,9 @@ directories and files use modes `0700` and `0600`.
 
 `/resume PATH` validates and opens a transcript, rebuilds model/UI history, and
 requeues safely recoverable unfinished turns. It never reruns a tool call whose
-side effect may already have happened: a missing result is recorded as an
-interruption error before the model continues. The session-aware
+side effect may already have happened. The requeued query detects missing tool
+messages, persists interruption failures for them, and commits the
+model-facing edit immediately before the model continues. The session-aware
 `tool_result_reader` tool can consume a preview's `transcript_ref` in bounded
 character ranges. `/resume` and `/clear` share the input FIFO, so they run
 after earlier work and select the session used by later queued inputs.
@@ -222,6 +226,9 @@ protocol history. The UI projector emits flat durable presentation facts, and
 `ChatUiState` groups those facts for display. Small completed values shared by
 these layers, such as tool calls and token usage, live in
 `alpha_forge.models`; streaming state does not leak into the transcript layer.
+Internal assistant and tool messages carry output/result IDs and raw/finalized
+state for prompt policies; those application fields are omitted from OpenAI
+request dictionaries.
 
 All prompts and slash commands use one in-memory FIFO. An item is appended to
 the then-current session immediately before it is processed; waiting items are
@@ -252,9 +259,11 @@ Within a turn, tool calls and results are indented and rendered without blank
 lines. Incomplete tool-call IDs, names, and arguments render from the active
 draft. Completed model outputs become durable before execution starts. Each
 raw tool result is appended immediately after that tool returns, while a
-bounded provisional preview appears in the active pane. After every requested
-tool has returned, `tool.result_edit` makes the exact reproducible previews
-visible in call order and clears the active pane.
+presentation-only view of its last 20 lines appears in the active pane. At the
+beginning of the following iteration, `tool.result_edit` records the exact
+reproducible model-facing results in call order and clears the active pane
+before the next OpenAI request starts. Durable model-facing results pass
+through the same UI-only last-20-lines policy when rendered.
 
 Slash commands are durable activities too and share the same FIFO as prompts.
 The source transcript records the raw command and its structured result; the UI

@@ -369,6 +369,54 @@ class UnifiedInputTests(unittest.TestCase):
                 )
             )
 
+    def test_resume_edits_repaired_tool_batch_before_model_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = Session(transcript_path=Path(tmp) / "saved.jsonl")
+            turn = saved.submit_user("unfinished")
+            call = ToolCall("call", "echo", '{"text":"must not rerun"}')
+            prior_output = saved.add_assistant_message(
+                turn_id=turn,
+                response=ModelResponse(None, (call,)),
+            )
+            chat = ScriptedChat([[_completed("recovered")]])
+            controller, _ui = _controller(chat)
+
+            asyncio.run(_run(controller, f"/resume {saved.transcript_path}"))
+
+            events = controller.session.transcript.events
+            edit_position = next(
+                index
+                for index, event in enumerate(events)
+                if isinstance(event, ToolResultEdit)
+                and event.output_id == prior_output.output_id
+            )
+            next_output_position = next(
+                index
+                for index, event in enumerate(events)
+                if isinstance(event, ModelOutput)
+                and event.output_id != prior_output.output_id
+            )
+            self.assertLess(edit_position, next_output_position)
+            recovered_results = [
+                event
+                for event in events
+                if isinstance(event, ToolResult)
+                and event.output_id == prior_output.output_id
+            ]
+            self.assertEqual(len(recovered_results), 1)
+            self.assertTrue(recovered_results[0].failed)
+            recovered_result_position = events.index(recovered_results[0])
+            self.assertLess(recovered_result_position, edit_position)
+            self.assertEqual(len(chat.requests), 1)
+            self.assertEqual(
+                [message["role"] for message in chat.requests[0]],
+                ["system", "user", "assistant", "tool"],
+            )
+            self.assertIn(
+                "interrupted before its result was durably recorded",
+                chat.requests[0][-1]["content"],
+            )
+
     def test_exit_stops_accepting_and_runs_after_earlier_input(self) -> None:
         controller, ui = _controller(
             ScriptedChat([[_completed("before exit")]])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Protocol
 
 from alpha_forge.events import Event
 from alpha_forge.models import TokenUsage, ToolCall
@@ -30,8 +30,7 @@ from alpha_forge.system_events import (
     SessionViewChanged,
     StatusChanged,
     ToolBatchStarted,
-    ToolResultsFinalized,
-    ToolResultsUpdated,
+    ToolResultRecorded,
     ToolStarted,
 )
 from alpha_forge.ui_history import (
@@ -55,12 +54,44 @@ HistoryRole = Literal[
     "error",
     "spacer",
 ]
+DEFAULT_UI_TOOL_RESULT_LINES = 20
 
 
 @dataclass(frozen=True, slots=True)
 class HistoryLine:
     role: HistoryRole
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class UiToolResultPreview:
+    content: str
+    truncated: bool
+
+
+class UiToolResultPreviewStrategy(Protocol):
+    """Bound tool-result content for terminal presentation only."""
+
+    def preview(self, content: str) -> UiToolResultPreview:
+        """Return presentation content without changing model prompts."""
+
+
+class TailLinesUiToolResultPreview:
+    """Show at most the last configured number of lines."""
+
+    def __init__(self, line_limit: int = DEFAULT_UI_TOOL_RESULT_LINES) -> None:
+        if line_limit <= 0:
+            raise ValueError("UI tool-result line limit must be positive")
+        self.line_limit = line_limit
+
+    def preview(self, content: str) -> UiToolResultPreview:
+        lines = content.splitlines()
+        if len(lines) <= self.line_limit:
+            return UiToolResultPreview(content, False)
+        return UiToolResultPreview(
+            "\n".join(lines[-self.line_limit :]),
+            True,
+        )
 
 
 @dataclass(slots=True)
@@ -97,7 +128,12 @@ type ActiveState = ActiveModelResponse | ActiveToolBatch
 class ChatUiState:
     """Reduce immutable application events into presentation-only state."""
 
-    def __init__(self, view: SessionView) -> None:
+    def __init__(
+        self,
+        view: SessionView,
+        *,
+        tool_result_preview: UiToolResultPreviewStrategy | None = None,
+    ) -> None:
         self.view = view
         self.head_turn_id = view.head_turn_id
         self.history_items: tuple[UiHistoryItem, ...] = view.items
@@ -105,6 +141,9 @@ class ChatUiState:
         self.status = "Ready"
         self.exiting = False
         self.persistence_error: str | None = None
+        self.tool_result_preview = (
+            tool_result_preview or TailLinesUiToolResultPreview()
+        )
         self._queued_inputs: dict[str, str] = {}
         self._cache_key: tuple[int, str | None, str | None] | None = None
         self._transcript_cache: tuple[HistoryLine, ...] = ()
@@ -184,6 +223,15 @@ class ChatUiState:
                 event.output_id,
                 event.calls,
             )
+            calls = {call.id: call for call in event.calls}
+            self.active.results = {
+                result.call_id: self._active_tool_result(
+                    calls[result.call_id],
+                    result.content,
+                    result.failed,
+                )
+                for result in event.results
+            }
             self.status = "Preparing tools"
             self._invalidate_transcript()
         elif isinstance(event, ToolStarted):
@@ -192,31 +240,18 @@ class ChatUiState:
             self.active.running_call_id = event.call_id
             call = self._active_call(self.active, event.call_id)
             self.status = f"Running tool: {call.name}"
-        elif isinstance(event, ToolResultsUpdated):
+        elif isinstance(event, ToolResultRecorded):
             if not isinstance(self.active, ActiveToolBatch):
                 raise RuntimeError("no active tool batch")
-            calls = {call.id: call for call in self.active.calls}
-            self.active.results = {
-                result.call_id: ActiveToolResult(
-                    call_id=result.call_id,
-                    name=calls[result.call_id].name,
-                    content=result.content,
-                    failed=result.failed,
-                    previewed=result.previewed,
-                )
-                for result in event.results
-            }
+            result = event.result
+            call = self._active_call(self.active, result.call_id)
+            self.active.results[result.call_id] = self._active_tool_result(
+                call,
+                result.content,
+                result.failed,
+            )
             self.active.running_call_id = None
             self.status = "Continuing tools"
-        elif isinstance(event, ToolResultsFinalized):
-            if (
-                not isinstance(self.active, ActiveToolBatch)
-                or self.active.output_id != event.output_id
-            ):
-                raise RuntimeError("finalized tools do not match active output")
-            self.active = None
-            self._invalidate_transcript()
-            self.status = self._queue_status()
         elif isinstance(event, PersistenceFailed):
             self.persistence_error = event.message
             if isinstance(self.active, ActiveModelResponse):
@@ -396,13 +431,14 @@ class ChatUiState:
             )
             result = results.get(call.id)
             if result is not None:
+                preview = self.tool_result_preview.preview(result.content)
                 label = "Tool error" if result.failed else "Tool result"
-                if result.previewed:
+                if result.previewed or preview.truncated:
                     label += " preview"
                 lines.extend(
                     self._labeled_lines(
                         f"  {label} [{call.name}]: ",
-                        result.content,
+                        preview.content,
                         "error" if result.failed else "tool_result",
                     )
                 )
@@ -591,6 +627,21 @@ class ChatUiState:
                 return call
         raise KeyError(call_id)
 
+    def _active_tool_result(
+        self,
+        call: ToolCall,
+        content: str,
+        failed: bool,
+    ) -> ActiveToolResult:
+        preview = self.tool_result_preview.preview(content)
+        return ActiveToolResult(
+            call_id=call.id,
+            name=call.name,
+            content=preview.content,
+            failed=failed,
+            previewed=preview.truncated,
+        )
+
     @staticmethod
     def _labeled_lines(
         prefix: str,
@@ -642,6 +693,10 @@ __all__ = [
     "ActiveToolBatch",
     "ActiveToolResult",
     "ChatUiState",
+    "DEFAULT_UI_TOOL_RESULT_LINES",
     "HistoryLine",
     "HistoryRole",
+    "TailLinesUiToolResultPreview",
+    "UiToolResultPreview",
+    "UiToolResultPreviewStrategy",
 ]

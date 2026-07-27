@@ -46,6 +46,7 @@ class AssistantMessage(Message):
     tool_calls: tuple[ToolCall, ...] = ()
     reasoning_content: str | None = None
     refusal: str | None = None
+    output_id: str | None = None
     role: ClassVar[Literal["assistant"]] = "assistant"
 
     def to_openai(self) -> dict[str, Any]:
@@ -74,6 +75,8 @@ class ToolMessage(Message):
     content: str
     tool_call_id: str
     failed: bool = False
+    result_id: str | None = None
+    raw: bool = False
     role: ClassVar[Literal["tool"]] = "tool"
 
     def to_openai(self) -> dict[str, Any]:

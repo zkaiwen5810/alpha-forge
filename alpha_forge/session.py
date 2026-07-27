@@ -101,6 +101,11 @@ class Session:
     def messages_for_turn(self, turn_id: str) -> list[Message]:
         return ModelHistoryProjector(self.transcript).messages(head_turn_id=turn_id)
 
+    def query_messages_for_turn(self, turn_id: str) -> list[Message]:
+        return ModelHistoryProjector(self.transcript).query_messages(
+            head_turn_id=turn_id
+        )
+
     def submit_user(
         self,
         content: str,
@@ -222,7 +227,7 @@ class Session:
         expected_edit = ToolResultPromptEditor(
             individual_limit=edit.individual_limit,
             aggregate_limit=edit.aggregate_limit,
-        ).edit(raw)
+        ).edit_results(raw)
         if edit != expected_edit:
             raise RuntimeError(
                 "prompt edit does not match its declared policy and limits"
@@ -321,13 +326,8 @@ class Session:
         self.transcript.append(event)
         return event
 
-    def recover_unfinished_turns(
-        self,
-        *,
-        prompt_editor: ToolResultPromptEditor | None = None,
-    ) -> list[PendingTurn]:
-        """Repair interrupted tool batches and return branch work to requeue."""
-        editor = prompt_editor or ToolResultPromptEditor()
+    def recover_unfinished_turns(self) -> list[PendingTurn]:
+        """Return unfinished branch work without repeating tool execution."""
         pending: list[PendingTurn] = []
         for turn in self._ancestry(self._head_turn_id):
             if self._turn_failed(turn.turn_id):
@@ -339,36 +339,6 @@ class Session:
             latest = outputs[-1]
             if not latest.tool_calls:
                 continue
-            if self._tool_edit(latest.output_id) is None:
-                results = self._results_for_output(latest.output_id)
-                by_call = {result.call_id: result for result in results}
-                ordered: list[ToolResult] = []
-                for call in latest.tool_calls:
-                    result = by_call.get(call.id)
-                    if result is None:
-                        result = self.add_tool_result(
-                            output_id=latest.output_id,
-                            call_id=call.id,
-                            content=(
-                                "error: tool execution was interrupted before "
-                                "its result was durably recorded"
-                            ),
-                            failed=True,
-                        )
-                    ordered.append(result)
-                raw = tuple(
-                    RawToolResult(
-                        result.result_id,
-                        result.call_id,
-                        result.content,
-                        result.failed,
-                    )
-                    for result in ordered
-                )
-                self.add_prompt_edit(
-                    output_id=latest.output_id,
-                    edit=editor.edit(raw),
-                )
             pending.append(PendingTurn(turn.turn_id, turn.content))
         return pending
 

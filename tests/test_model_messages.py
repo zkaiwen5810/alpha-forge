@@ -23,8 +23,15 @@ class WireMessageTests(unittest.TestCase):
                         '{"expression":"2+2"}',
                     ),
                 ),
+                output_id="output-1",
             ),
-            ToolMessage("4", tool_call_id="call-1", failed=True),
+            ToolMessage(
+                "4",
+                tool_call_id="call-1",
+                failed=True,
+                result_id="result-1",
+                raw=True,
+            ),
         ]
 
         self.assertEqual(

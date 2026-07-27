@@ -1,7 +1,19 @@
 import unittest
 
-from alpha_forge.models import PromptEdit, PromptEditDecision, RawToolResult
+from alpha_forge.model_messages import (
+    AssistantMessage,
+    ToolMessage,
+    UserMessage,
+)
+from alpha_forge.models import (
+    PromptEdit,
+    PromptEditDecision,
+    RawToolResult,
+    ToolCall,
+)
 from alpha_forge.prompt_editor import (
+    INTERRUPTED_TOOL_RESULT_CONTENT,
+    PromptDraft,
     PromptEditBudgetError,
     ToolResultPromptEditor,
 )
@@ -35,7 +47,7 @@ class ToolResultPromptEditorTests(unittest.TestCase):
         )
         results = (_result("one", "first"), _result("two", "second", failed=True))
 
-        applied = editor.edit(results)
+        applied = editor.edit_results(results)
         rendered = [
             editor.render(result, decision)
             for result, decision in zip(results, applied.decisions, strict=True)
@@ -45,6 +57,97 @@ class ToolResultPromptEditorTests(unittest.TestCase):
         self.assertTrue(all(decision.reason is None for decision in applied.decisions))
         self.assertTrue(results[1].failed)
 
+    def test_prompt_strategy_is_a_noop_without_raw_tool_messages(self) -> None:
+        editor = ToolResultPromptEditor()
+        messages = (UserMessage("hello"),)
+
+        edited = editor.edit(PromptDraft(messages))
+
+        self.assertEqual(edited.messages, messages)
+        self.assertIsNone(edited.tool_batch_edit)
+
+    def test_prompt_strategy_edits_raw_message_tail_in_call_order(self) -> None:
+        editor = ToolResultPromptEditor()
+        calls = (
+            ToolCall("one", "tool", "{}"),
+            ToolCall("two", "tool", "{}"),
+        )
+        draft = PromptDraft(
+            (
+                UserMessage("run"),
+                AssistantMessage(None, calls, output_id="output"),
+                ToolMessage(
+                    "second",
+                    "two",
+                    result_id="result-two",
+                    raw=True,
+                ),
+                ToolMessage(
+                    "first",
+                    "one",
+                    result_id="result-one",
+                    raw=True,
+                ),
+            ),
+        )
+
+        edited = editor.edit(draft)
+
+        self.assertIsNotNone(edited.tool_batch_edit)
+        assert edited.tool_batch_edit is not None
+        self.assertEqual(
+            [message.to_openai()["role"] for message in edited.messages],
+            ["user", "assistant", "tool", "tool"],
+        )
+        self.assertEqual(
+            [result.call_id for result in edited.tool_batch_edit.results],
+            ["one", "two"],
+        )
+        self.assertTrue(
+            all(
+                not message.raw
+                for message in edited.messages
+                if isinstance(message, ToolMessage)
+            )
+        )
+
+    def test_missing_result_policy_synthesizes_only_absent_calls(self) -> None:
+        editor = ToolResultPromptEditor()
+        calls = (
+            ToolCall("one", "tool", "{}"),
+            ToolCall("two", "tool", "{}"),
+        )
+        draft = PromptDraft(
+            (
+                UserMessage("run"),
+                AssistantMessage(None, calls, output_id="output"),
+                ToolMessage(
+                    "first",
+                    "one",
+                    result_id="result-one",
+                    raw=True,
+                ),
+            )
+        )
+
+        edited = editor.edit(draft)
+
+        assert edited.tool_batch_edit is not None
+        effect = edited.tool_batch_edit
+        self.assertEqual(
+            [result.call_id for result in effect.existing_results],
+            ["one"],
+        )
+        self.assertEqual(
+            [result.call_id for result in effect.synthesized_results],
+            ["two"],
+        )
+        self.assertTrue(effect.synthesized_results[0].failed)
+        self.assertEqual(
+            effect.synthesized_results[0].content,
+            INTERRUPTED_TOOL_RESULT_CONTENT,
+        )
+
     def test_individual_overflow_creates_stable_head_tail_preview(self) -> None:
         content = "HEAD" + ("x" * 1_000) + "TAIL"
         editor = ToolResultPromptEditor(
@@ -53,7 +156,7 @@ class ToolResultPromptEditorTests(unittest.TestCase):
         )
         result = _result("one", content)
 
-        applied = editor.edit((result,))
+        applied = editor.edit_results((result,))
         preview = editor.render(result, applied.decisions[0])
 
         self.assertEqual(len(preview), 500)
@@ -73,7 +176,7 @@ class ToolResultPromptEditorTests(unittest.TestCase):
             _result("b", "b" * 900),
         )
 
-        applied = editor.edit(results)
+        applied = editor.edit_results(results)
         rendered = [
             editor.render(result, decision)
             for result, decision in zip(results, applied.decisions, strict=True)
@@ -95,7 +198,7 @@ class ToolResultPromptEditorTests(unittest.TestCase):
         )
         results = (_result("a", "a" * 900), _result("b", "b" * 900))
 
-        applied = editor.edit(results)
+        applied = editor.edit_results(results)
 
         self.assertEqual(
             [decision.reason for decision in applied.decisions],
@@ -112,7 +215,7 @@ class ToolResultPromptEditorTests(unittest.TestCase):
         )
 
         with self.assertRaises(PromptEditBudgetError):
-            editor.edit((_result("one", "x" * 20),))
+            editor.edit_results((_result("one", "x" * 20),))
 
     def test_rejects_nonpositive_limits(self) -> None:
         with self.assertRaises(ValueError):

@@ -224,7 +224,7 @@ class BashToolTests(unittest.TestCase):
         )
         session.add_prompt_edit(
             output_id=output.output_id,
-            edit=editor.edit(
+            edit=editor.edit_results(
                 (
                     RawToolResult(
                         raw.result_id,

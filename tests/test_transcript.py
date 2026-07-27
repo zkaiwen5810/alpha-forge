@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from alpha_forge.model_messages import ToolCall
+from alpha_forge.model_messages import AssistantMessage, ToolCall
 from alpha_forge.model_history import ModelHistoryProjector
 from alpha_forge.models import RawToolResult
 from alpha_forge.prompt_editor import ToolResultPromptEditor
@@ -22,6 +22,8 @@ from alpha_forge.system_events import (
     ModelResponseStarted,
     PersistenceFailed,
     SessionView,
+    ToolBatchStarted,
+    ToolResultRecorded,
 )
 from alpha_forge.transcript import (
     Command,
@@ -43,7 +45,10 @@ from alpha_forge.ui_history import (
     UiModelOutput,
     UiToolResult,
 )
-from alpha_forge.ui_state import ChatUiState
+from alpha_forge.ui_state import (
+    ChatUiState,
+    TailLinesUiToolResultPreview,
+)
 
 
 def _view(session: Session) -> SessionView:
@@ -76,7 +81,7 @@ def _finalize(
     )
     return session.add_prompt_edit(
         output_id=output_id,
-        edit=editor.edit(raw),
+        edit=editor.edit_results(raw),
     )
 
 
@@ -359,7 +364,7 @@ class SessionProtocolTests(unittest.TestCase):
             response=ModelResponse("finished"),
         )
 
-    def test_recovery_synthesizes_missing_results_and_requeues(self) -> None:
+    def test_recovery_requeues_missing_results_without_session_writes(self) -> None:
         session = Session(transcript=Transcript.in_memory())
         turn = session.submit_user("run")
         session.add_assistant_message(
@@ -383,9 +388,19 @@ class SessionProtocolTests(unittest.TestCase):
             for event in session.transcript.events
             if isinstance(event, ToolResult)
         ]
-        self.assertEqual(len(results), 2)
-        self.assertTrue(all(result.failed for result in results))
-        self.assertIsInstance(session.transcript.events[-1], ToolResultEdit)
+        self.assertEqual(results, [])
+        self.assertFalse(
+            any(
+                isinstance(event, ToolResultEdit)
+                for event in session.transcript.events
+            )
+        )
+        query_messages = session.query_messages_for_turn(turn)
+        self.assertIsInstance(query_messages[-1], AssistantMessage)
+        self.assertEqual(
+            query_messages[-1].output_id,  # type: ignore[attr-defined]
+            session.transcript.events[-1].output_id,  # type: ignore[attr-defined]
+        )
 
     def test_session_transition_is_destination_activity(self) -> None:
         source = Session(transcript=Transcript.in_memory(session_id="source"))
@@ -404,6 +419,61 @@ class SessionProtocolTests(unittest.TestCase):
 
 
 class EphemeralStateTests(unittest.TestCase):
+    def test_active_raw_tool_result_uses_ui_tail_lines(self) -> None:
+        session = Session(transcript=Transcript.in_memory())
+        turn = session.submit_user("run")
+        call = ToolCall("call", "tool", "{}")
+        ui = ChatUiState(
+            _view(session),
+            tool_result_preview=TailLinesUiToolResultPreview(2),
+        )
+        ui.handle(ToolBatchStarted(turn, "output", (call,)))
+        ui.handle(
+            ToolResultRecorded(
+                RawToolResult(
+                    "result",
+                    "call",
+                    "first\nsecond\nthird",
+                )
+            )
+        )
+
+        self.assertNotIn("first", ui.active_text())
+        self.assertIn("second", ui.active_text())
+        self.assertIn("third", ui.active_text())
+        self.assertIn("Tool result preview", ui.active_text())
+
+    def test_durable_tool_result_uses_same_ui_tail_lines(self) -> None:
+        session = Session(transcript=Transcript.in_memory())
+        turn = session.submit_user("run")
+        output = session.add_assistant_message(
+            turn_id=turn,
+            response=ModelResponse(
+                None,
+                (ToolCall("call", "tool", "{}"),),
+            ),
+        )
+        raw = session.add_tool_result(
+            output_id=output.output_id,
+            call_id="call",
+            content="first\nsecond\nthird",
+            failed=False,
+        )
+        _finalize(session, output.output_id, (raw,))
+        session.add_assistant_message(
+            turn_id=turn,
+            response=ModelResponse("finished"),
+        )
+        ui = ChatUiState(
+            _view(session),
+            tool_result_preview=TailLinesUiToolResultPreview(2),
+        )
+
+        self.assertNotIn("first", ui.transcript_text())
+        self.assertIn("second", ui.transcript_text())
+        self.assertIn("third", ui.transcript_text())
+        self.assertIn("Tool result preview", ui.transcript_text())
+
     def test_partial_output_is_ui_only_until_session_persists_response(self) -> None:
         session = Session(transcript=Transcript.in_memory())
         turn = session.submit_user("hello")

@@ -29,6 +29,31 @@ class ModelHistoryProjector:
         self.transcript = transcript
 
     def messages(self, *, head_turn_id: str | None = None) -> list[Message]:
+        return list(
+            self._project(
+                head_turn_id=head_turn_id,
+                include_unfinished=False,
+            )
+        )
+
+    def query_messages(
+        self,
+        *,
+        head_turn_id: str | None = None,
+    ) -> list[Message]:
+        return list(
+            self._project(
+                head_turn_id=head_turn_id,
+                include_unfinished=True,
+            )
+        )
+
+    def _project(
+        self,
+        *,
+        head_turn_id: str | None,
+        include_unfinished: bool,
+    ) -> tuple[Message, ...]:
         messages: list[Message] = []
         if self.transcript.system_prompt:
             messages.append(SystemMessage(self.transcript.system_prompt))
@@ -51,7 +76,25 @@ class ModelHistoryProjector:
                 if output.tool_calls:
                     edit = edits.get(output.output_id)
                     if edit is None:
-                        break
+                        if not include_unfinished:
+                            return tuple(messages)
+                        messages.append(self._assistant_message(output))
+                        resolved = [
+                            results.get((output.output_id, call.id))
+                            for call in output.tool_calls
+                        ]
+                        messages.extend(
+                            ToolMessage(
+                                result.content,
+                                result.call_id,
+                                result.failed,
+                                result_id=result.result_id,
+                                raw=True,
+                            )
+                            for result in resolved
+                            if result is not None
+                        )
+                        return tuple(messages)
                     resolved = [
                         results.get((output.output_id, decision.call_id))
                         for decision in edit.decisions
@@ -78,13 +121,14 @@ class ModelHistoryProjector:
                                 ),
                                 result.call_id,
                                 result.failed,
+                                result_id=result.result_id,
                             )
                         )
                     continue
 
                 messages.append(self._assistant_message(output))
                 break
-        return messages
+        return tuple(messages)
 
     @staticmethod
     def _assistant_message(output: ModelOutput) -> AssistantMessage:
@@ -93,6 +137,7 @@ class ModelHistoryProjector:
             tool_calls=output.tool_calls,
             reasoning_content=output.reasoning_content,
             refusal=output.refusal,
+            output_id=output.output_id,
         )
 
     def _ancestry(self, head_turn_id: str | None) -> list[UserMessage]:

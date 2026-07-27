@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from alpha_forge.events import Event
-from alpha_forge.models import EditedToolResult, ToolCall
+from alpha_forge.models import RawToolResult, ToolCall
 from alpha_forge.streaming import ModelResponse
 from alpha_forge.ui_history import UiHistoryItem
 
@@ -63,6 +63,7 @@ class ToolBatchStarted(SystemEvent):
     turn_id: str
     output_id: str
     calls: tuple[ToolCall, ...]
+    results: tuple[RawToolResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,13 +72,8 @@ class ToolStarted(SystemEvent):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolResultsUpdated(SystemEvent):
-    results: tuple[EditedToolResult, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ToolResultsFinalized(SystemEvent):
-    output_id: str
+class ToolResultRecorded(SystemEvent):
+    result: RawToolResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +117,6 @@ __all__ = [
     "StatusChanged",
     "SystemEvent",
     "ToolBatchStarted",
-    "ToolResultsFinalized",
-    "ToolResultsUpdated",
+    "ToolResultRecorded",
     "ToolStarted",
 ]

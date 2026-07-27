@@ -13,7 +13,7 @@ from uuid import uuid4
 from alpha_forge.chat import ChatClient
 from alpha_forge.config import Config
 from alpha_forge.events import EventRouter
-from alpha_forge.prompt_editor import ToolResultPromptEditor
+from alpha_forge.prompt_editor import PromptEditor, ToolResultPromptEditor
 from alpha_forge.query import (
     MAX_TOOL_ROUNDS,
     ModelDeltaReceived,
@@ -24,7 +24,6 @@ from alpha_forge.query import (
     QueryRequest,
     ToolBatchStarted as QueryToolBatchStarted,
     ToolExecutionStarted,
-    ToolPreviewUpdated,
     ToolResultProduced,
     ToolResultsEdited,
 )
@@ -45,8 +44,7 @@ from alpha_forge.system_events import (
     SessionViewChanged,
     StatusChanged,
     ToolBatchStarted,
-    ToolResultsFinalized,
-    ToolResultsUpdated,
+    ToolResultRecorded,
     ToolStarted,
 )
 from alpha_forge.tool_execution import ToolExecutor
@@ -98,7 +96,7 @@ class ChatReplController:
         command_handler: SlashCommandHandler | None = None,
         tool_registry: ToolRegistry | None = None,
         session: Session | None = None,
-        prompt_editor: ToolResultPromptEditor | None = None,
+        prompt_editor: PromptEditor | None = None,
         query: QueryEngine | None = None,
     ) -> None:
         self.config = config
@@ -208,7 +206,7 @@ class ChatReplController:
         self._publish_view()
         registry = self._query_registry(session)
         request = QueryRequest(
-            messages=tuple(session.messages_for_turn(resolved_turn)),
+            messages=tuple(session.query_messages_for_turn(resolved_turn)),
             tool_definitions=tuple(registry.definitions()),
             tool_executor=ToolExecutor(registry),
         )
@@ -254,7 +252,12 @@ class ChatReplController:
             return
         if isinstance(event, QueryToolBatchStarted):
             self.events.publish(
-                ToolBatchStarted(turn_id, event.output_id, event.calls)
+                ToolBatchStarted(
+                    turn_id,
+                    event.output_id,
+                    event.calls,
+                    event.results,
+                )
             )
             return
         if isinstance(event, ToolExecutionStarted):
@@ -262,15 +265,11 @@ class ChatReplController:
             return
         if isinstance(event, ToolResultProduced):
             self._commit_query_event(session, turn_id, event, "raw tool result")
-            return
-        if isinstance(event, ToolPreviewUpdated):
-            self.events.publish(ToolResultsUpdated(event.results))
+            self.events.publish(ToolResultRecorded(event.result))
             return
         if isinstance(event, ToolResultsEdited):
-            self.events.publish(ToolResultsUpdated(event.results))
             self._commit_query_event(session, turn_id, event, "prompt edit")
-            self._publish_view()
-            self.events.publish(ToolResultsFinalized(event.output_id))
+            self._publish_view(reset_active=True)
 
     def _commit_query_event(
         self,
@@ -365,9 +364,7 @@ class ChatReplController:
                 kind = "clear"
             else:
                 destination = Session.resume(Path(resume_path))
-                pending = destination.recover_unfinished_turns(
-                    prompt_editor=self.prompt_editor
-                )
+                pending = destination.recover_unfinished_turns()
                 kind = "resume"
             destination.add_session_transition(
                 kind=kind,

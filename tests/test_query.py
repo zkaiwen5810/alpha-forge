@@ -1,15 +1,25 @@
 import asyncio
 import unittest
 
-from alpha_forge.model_messages import UserMessage
+from alpha_forge.model_messages import (
+    AssistantMessage,
+    ToolMessage,
+    UserMessage,
+)
 from alpha_forge.models import ToolCall
-from alpha_forge.prompt_editor import ToolResultPromptEditor
+from alpha_forge.prompt_editor import (
+    EditedPrompt,
+    PromptDraft,
+    ToolResultPromptEditor,
+)
 from alpha_forge.query import (
     ModelDeltaReceived,
     ModelRoundCompleted,
+    ModelRoundStarted,
     QueryCompleted,
     QueryEngine,
     QueryRequest,
+    ToolBatchStarted,
     ToolResultProduced,
     ToolResultsEdited,
 )
@@ -101,14 +111,196 @@ class QueryEngineTests(unittest.TestCase):
 
         self.assertEqual(executor.calls, [call])
         self.assertGreater(len(raw.result.content), 300)
-        self.assertEqual(len(edited.results[0].content), 300)
-        self.assertIn("transcript_ref", edited.results[0].content)
+        model_result = model.requests[1][-1]["content"]
+        assert isinstance(model_result, str)
+        self.assertEqual(len(model_result), 300)
+        self.assertIn("transcript_ref", model_result)
         self.assertEqual(model.requests[1][-2]["role"], "assistant")
         self.assertEqual(model.requests[1][-1]["role"], "tool")
-        self.assertEqual(
-            model.requests[1][-1]["content"],
-            edited.results[0].content,
+        edit_position = events.index(edited)
+        round_starts = [
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, ModelRoundStarted)
+        ]
+        self.assertLess(edit_position, round_starts[1])
+
+    def test_editor_runs_once_per_iteration_only_before_client_call(self) -> None:
+        trace: list[str] = []
+        call = ToolCall("call", "echo", "{}")
+
+        class TracedModel(ScriptedModel):
+            async def stream_response(  # type: ignore[no-untyped-def]
+                self,
+                messages,
+                *,
+                tools,
+            ):
+                trace.append("client")
+                async for event in super().stream_response(
+                    messages,
+                    tools=tools,
+                ):
+                    yield event
+
+        class TracedEditor:
+            def __init__(self) -> None:
+                self.delegate = ToolResultPromptEditor()
+
+            def edit(self, draft: PromptDraft):  # type: ignore[no-untyped-def]
+                trace.append(
+                    "edit:pending"
+                    if any(
+                        isinstance(message, ToolMessage) and message.raw
+                        for message in draft.messages
+                    )
+                    else "edit:empty"
+                )
+                return self.delegate.edit(draft)
+
+        class TracedExecutor(RecordingExecutor):
+            async def execute(self, requested: ToolCall) -> ExecutedToolResult:
+                trace.append("tool")
+                return await super().execute(requested)
+
+        query = QueryEngine(
+            TracedModel(
+                [
+                    [StreamCompleted(ModelResponse(None, (call,)))],
+                    [StreamCompleted(ModelResponse("done"))],
+                ]
+            ),  # type: ignore[arg-type]
+            prompt_editor=TracedEditor(),
         )
+
+        async def collect():  # type: ignore[no-untyped-def]
+            return [
+                event
+                async for event in query.run(
+                    QueryRequest(
+                        messages=(UserMessage("run"),),
+                        tool_definitions=(),
+                        tool_executor=TracedExecutor(),
+                    )
+                )
+            ]
+
+        asyncio.run(collect())
+
+        self.assertEqual(
+            trace,
+            [
+                "edit:empty",
+                "client",
+                "tool",
+                "edit:pending",
+                "client",
+            ],
+        )
+
+    def test_initial_unfinished_messages_synthesize_only_missing_results(
+        self,
+    ) -> None:
+        calls = (
+            ToolCall("one", "tool", "{}"),
+            ToolCall("two", "tool", "{}"),
+        )
+        model = ScriptedModel(
+            [[StreamCompleted(ModelResponse("recovered"))]]
+        )
+        executor = RecordingExecutor()
+        query = QueryEngine(model)  # type: ignore[arg-type]
+
+        async def collect():  # type: ignore[no-untyped-def]
+            return [
+                event
+                async for event in query.run(
+                    QueryRequest(
+                        messages=(
+                            UserMessage("run"),
+                            AssistantMessage(
+                                None,
+                                calls,
+                                output_id="prior-output",
+                            ),
+                            ToolMessage(
+                                "first",
+                                "one",
+                                result_id="result-one",
+                                raw=True,
+                            ),
+                        ),
+                        tool_definitions=(),
+                        tool_executor=executor,
+                    )
+                )
+            ]
+
+        events = asyncio.run(collect())
+        started = next(
+            event for event in events if isinstance(event, ToolBatchStarted)
+        )
+        produced = [
+            event
+            for event in events
+            if isinstance(event, ToolResultProduced)
+        ]
+
+        self.assertEqual(
+            [result.call_id for result in started.results],
+            ["one"],
+        )
+        self.assertEqual([event.result.call_id for event in produced], ["two"])
+        self.assertTrue(produced[0].result.failed)
+        self.assertEqual(executor.calls, [])
+        self.assertEqual(
+            [message["role"] for message in model.requests[0]],
+            ["user", "assistant", "tool", "tool"],
+        )
+
+    def test_raw_tool_messages_cannot_reach_model_client(self) -> None:
+        call = ToolCall("call", "tool", "{}")
+        model = ScriptedModel(
+            [[StreamCompleted(ModelResponse("must not run"))]]
+        )
+
+        class NoOpEditor:
+            def edit(self, draft: PromptDraft) -> EditedPrompt:
+                return EditedPrompt(draft.messages)
+
+        query = QueryEngine(  # type: ignore[arg-type]
+            model,
+            prompt_editor=NoOpEditor(),
+        )
+
+        async def collect():  # type: ignore[no-untyped-def]
+            return [
+                event
+                async for event in query.run(
+                    QueryRequest(
+                        messages=(
+                            UserMessage("run"),
+                            AssistantMessage(
+                                None,
+                                (call,),
+                                output_id="output",
+                            ),
+                            ToolMessage(
+                                "raw",
+                                "call",
+                                result_id="result",
+                                raw=True,
+                            ),
+                        ),
+                        tool_definitions=(),
+                        tool_executor=RecordingExecutor(),
+                    )
+                )
+            ]
+
+        with self.assertRaisesRegex(RuntimeError, "left raw tool messages"):
+            asyncio.run(collect())
+        self.assertEqual(model.requests, [])
 
     def test_stream_without_completion_fails(self) -> None:
         query = QueryEngine(ScriptedModel([[TextDelta("partial")]]))  # type: ignore[arg-type]
