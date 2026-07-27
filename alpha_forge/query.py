@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import uuid4
@@ -22,12 +23,12 @@ MAX_TOOL_ROUNDS = 10
 
 
 class ModelClient(Protocol):
-    async def stream_response(
+    def stream_response(
         self,
         messages: list[Message],
         *,
         tools: list[dict[str, Any]],
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Stream one provider response for explicit prompt messages."""
 
 
@@ -125,7 +126,7 @@ class QueryEngine:
         self.prompt_editor = prompt_editor or ToolResultPromptEditor()
         self.max_tool_rounds = max_tool_rounds
 
-    async def run(self, request: QueryRequest) -> AsyncIterator[QueryStreamEvent]:
+    async def run(self, request: QueryRequest) -> AsyncGenerator[QueryStreamEvent, None]:
         messages = list(request.messages)
         tools = list(request.tool_definitions)
 
@@ -133,15 +134,18 @@ class QueryEngine:
             output_id = uuid4().hex
             yield ModelRoundStarted(output_id)
             response: ModelResponse | None = None
-            async for event in self.client.stream_response(messages, tools=tools):
-                if isinstance(event, StreamCompleted):
-                    if response is not None:
-                        raise RuntimeError(
-                            "model stream emitted completion more than once"
-                        )
-                    response = event.response
-                else:
-                    yield ModelDeltaReceived(output_id, event)
+            async with aclosing(
+                self.client.stream_response(messages, tools=tools)
+            ) as stream_events:
+                async for event in stream_events:
+                    if isinstance(event, StreamCompleted):
+                        if response is not None:
+                            raise RuntimeError(
+                                "model stream emitted completion more than once"
+                            )
+                        response = event.response
+                    else:
+                        yield ModelDeltaReceived(output_id, event)
             if response is None:
                 raise RuntimeError(
                     "model stream ended without a completed response"

@@ -128,6 +128,39 @@ class QueryEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "without a completed response"):
             asyncio.run(collect())
 
+    def test_closing_query_closes_active_model_stream(self) -> None:
+        class ClosableModel:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def stream_response(
+                self, messages, *, tools  # type: ignore[no-untyped-def]
+            ):
+                try:
+                    yield TextDelta("partial")
+                    await asyncio.Event().wait()
+                finally:
+                    self.closed = True
+
+        model = ClosableModel()
+        query = QueryEngine(model)  # type: ignore[arg-type]
+
+        async def close_early() -> None:
+            events = query.run(
+                QueryRequest(
+                    messages=(UserMessage("hi"),),
+                    tool_definitions=(),
+                    tool_executor=RecordingExecutor(),
+                )
+            )
+            await anext(events)
+            await anext(events)
+            await events.aclose()
+
+        asyncio.run(close_early())
+
+        self.assertTrue(model.closed)
+
     def test_multiple_calls_execute_and_return_in_model_order(self) -> None:
         calls = (
             ToolCall("one", "echo", "{}"),

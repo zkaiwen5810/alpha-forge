@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from typing import Any, cast
 
 from openai import AsyncOpenAI, OpenAI
@@ -96,7 +96,7 @@ class ChatClient:
         messages: list[Message],
         *,
         tools: list[dict[str, Any]],
-    ) -> AsyncIterator[StreamEvent]:
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Yield normalized deltas for one streamed model response."""
         request: dict[str, Any] = {
             "model": self.config.model,
