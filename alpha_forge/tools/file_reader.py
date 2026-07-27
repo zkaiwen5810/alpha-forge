@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from alpha_forge.prompt_editor import MAX_TOOL_RESULT_CHARS
+from alpha_forge.context.tool_result_budget import MAX_TOOL_RESULT_CHARS
 from alpha_forge.tools.base import Tool, ToolExecutionError
 
 # Keep enough room for range metadata and for several ordinary reads to share
@@ -127,9 +127,8 @@ def read_file(arguments: Mapping[str, Any]) -> str:
 FILE_READER_TOOL = Tool(
     name="file_reader",
     aliases=("read_file",),
-    is_mcp=False,
-    description="Reads a bounded character range from a UTF-8 text file.",
-    prompt=(
+    display_description="Reads a bounded character range from a UTF-8 text file.",
+    description=(
         "Read a UTF-8 text file in bounded character ranges. Use offset 0 for "
         "the first range, then use the returned next_offset until eof is true. "
         "Offsets count Unicode characters, not bytes."
@@ -158,7 +157,7 @@ FILE_READER_TOOL = Tool(
         "required": ["path"],
         "additionalProperties": False,
     },
-    function=read_file,
+    handler=read_file,
 )
 
 

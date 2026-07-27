@@ -1,9 +1,8 @@
 import asyncio
 import unittest
 
-from alpha_forge.models import ToolCall
-from alpha_forge.tool_execution import ToolExecutor
-from alpha_forge.tools import Tool, ToolRegistry
+from alpha_forge.providers import ToolCall
+from alpha_forge.tools import Tool, ToolExecutor, ToolRegistry
 
 
 class ToolExecutorTests(unittest.TestCase):
@@ -12,9 +11,8 @@ class ToolExecutorTests(unittest.TestCase):
             [
                 Tool(
                     name="echo",
-                    function=lambda arguments: str(arguments["value"]),
+                    handler=lambda arguments: str(arguments["value"]),
                     description="echo",
-                    prompt="echo",
                     input_schema={"type": "object"},
                 )
             ]
@@ -27,7 +25,7 @@ class ToolExecutorTests(unittest.TestCase):
             )
         )
         self.assertEqual(result.content, "ok")
-        self.assertFalse(result.failed)
+        self.assertEqual(result.status, "success")
 
     def test_normalizes_bad_json_and_unknown_tools(self) -> None:
         executor = ToolExecutor(self.registry)
@@ -37,8 +35,8 @@ class ToolExecutorTests(unittest.TestCase):
         unknown = asyncio.run(
             executor.execute(ToolCall("two", "missing", "{}"))
         )
-        self.assertTrue(invalid.failed)
-        self.assertTrue(unknown.failed)
+        self.assertEqual(invalid.status, "error")
+        self.assertEqual(unknown.status, "error")
         self.assertIn("error:", invalid.content)
         self.assertIn("unknown tool", unknown.content)
 

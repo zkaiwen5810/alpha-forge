@@ -1,519 +1,389 @@
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from alpha_forge.model_messages import AssistantMessage, ToolCall
-from alpha_forge.model_history import ModelHistoryProjector
-from alpha_forge.models import RawToolResult
-from alpha_forge.prompt_editor import ToolResultPromptEditor
-from alpha_forge.session import Session
-from alpha_forge.streaming import (
-    ModelResponse,
-    ModelResponseAccumulator,
-    ReasoningDelta,
-    TextDelta,
-    ToolCallDelta,
+from alpha_forge.context import ContextPipeline, ToolResultBudgetPolicy
+from alpha_forge.providers import (
+    OutputMessage,
+    OutputText,
+    ProviderOutput,
+    ToolCall,
 )
-from alpha_forge.system_events import (
-    ModelResponseCompleted,
-    ModelResponseStarted,
-    PersistenceFailed,
-    SessionView,
-    ToolBatchStarted,
-    ToolResultRecorded,
-)
+from alpha_forge.sessions import Session
 from alpha_forge.transcript import (
-    Command,
-    CommandMessage,
-    CommandResult,
-    ModelOutput,
-    SessionTransition,
-    ToolResult,
-    ToolResultEdit,
-    Transcript,
+    ContextEdited,
+    InputAccepted,
+    PolicyInvocation,
+    SCHEMA_VERSION,
+    SetToolExchangeVisibility,
     TranscriptCorruptError,
     TranscriptPersistenceError,
-    TurnFailure,
-    UserMessage,
+    TranscriptStore,
 )
-from alpha_forge.ui_history import (
-    UiCommandMessage,
+from alpha_forge.projectors import (
+    ModelContextProjector,
     UiHistoryProjector,
+)
+from alpha_forge.projectors.ui_history import (
     UiModelOutput,
     UiToolResult,
 )
-from alpha_forge.ui_state import (
-    ChatUiState,
-    TailLinesUiToolResultPreview,
-)
 
 
-def _view(session: Session) -> SessionView:
-    return SessionView(
-        session.session_id,
-        session.transcript.revision,
-        session.head_turn_id,
-        tuple(
-            UiHistoryProjector(session.transcript).items(
-                head_turn_id=session.head_turn_id
+def _answer(text: str) -> ProviderOutput:
+    return ProviderOutput((OutputMessage((OutputText(text),)),), "stop")
+
+
+class TranscriptSchemaTests(unittest.TestCase):
+    def test_new_record_schema_is_version_one_and_linear(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            session = Session.create(
+                transcript_path=path,
+                session_id="session-one",
             )
-        ),
-    )
+            prompt = session.accept_prompt("hello")
+            session.record_model_output(prompt.event_id, _answer("hi"))
+            session.close()
 
+            records = [
+                json.loads(line) for line in path.read_text().splitlines()
+            ]
 
-def _finalize(
-    session: Session,
-    output_id: str,
-    results: tuple[ToolResult, ...],
-):
-    editor = ToolResultPromptEditor()
-    raw = tuple(
-        RawToolResult(
-            result.result_id,
-            result.call_id,
-            result.content,
-            result.failed,
+        self.assertEqual(SCHEMA_VERSION, 1)
+        self.assertEqual([record["schema_version"] for record in records], [1, 1, 1])
+        self.assertEqual([record["sequence"] for record in records], [0, 1, 2])
+        self.assertEqual(
+            [record["type"] for record in records],
+            ["session.opened", "input.accepted", "model.output"],
         )
-        for result in results
-    )
-    return session.add_prompt_edit(
-        output_id=output_id,
-        edit=editor.edit_results(raw),
-    )
+        serialized = json.dumps(records)
+        self.assertNotIn("turn_id", serialized)
+        self.assertNotIn("parent_event_id", serialized)
 
-
-class TranscriptStorageTests(unittest.TestCase):
-    def test_append_reload_permissions_and_flat_round_trip(self) -> None:
+    def test_resume_replays_and_validates_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "session.jsonl"
-            transcript = Transcript.create(
-                system_prompt="system",
-                session_id="session",
-                path=path,
+            session = Session.create(transcript_path=path)
+            prompt = session.accept_prompt("hello")
+            session.record_model_output(prompt.event_id, _answer("hi"))
+            expected = session.ui_history()
+            session.close()
+
+            resumed = Session.resume(path)
+            self.assertEqual(resumed.ui_history(), expected)
+            self.assertIsNone(resumed.open_query())
+            resumed.close()
+
+    def test_context_edit_round_trips_with_reproducible_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            session = Session.create(transcript_path=path)
+            prompt = session.accept_prompt("tool")
+            output = session.record_model_output(
+                prompt.event_id,
+                ProviderOutput((ToolCall("call", "tool", "{}"),)),
             )
-            transcript.append(UserMessage("turn", None, "hello ☃"))
-            transcript.append(ModelOutput("output", "turn", "hi", finish_reason="stop"))
-
-            resumed = Transcript.resume(path)
-
-            self.assertEqual(resumed.events, transcript.events)
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-            rows = [json.loads(line) for line in path.read_text().splitlines()]
-            self.assertTrue(all(row["schema_version"] == 4 for row in rows))
-            self.assertEqual(
-                [row["type"] for row in rows],
-                ["session.start", "user.message", "model.output"],
+            session.record_tool_result(
+                model_output_event_id=output.event_id,
+                call_id="call",
+                status="success",
+                content="x" * 1000,
             )
-
-    def test_resume_repairs_only_an_unterminated_tail(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "session.jsonl"
-            transcript = Transcript.create(system_prompt=None, path=path)
-            transcript.append(UserMessage("turn", None, "hello"))
-            with path.open("ab") as stream:
-                stream.write(b'{"partial":')
-
-            resumed = Transcript.resume(path)
-            resumed.append(TurnFailure("turn", "interrupted"))
-
-            self.assertTrue(path.read_bytes().endswith(b"\n"))
-            self.assertIsInstance(resumed.events[-1], TurnFailure)
-
-    def test_model_output_keeps_ordered_tool_calls_in_one_record(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "session.jsonl"
-            session = Session(transcript_path=path)
-            turn = session.submit_user("run")
-            session.add_assistant_message(
-                turn_id=turn,
-                response=ModelResponse(
-                    "working",
+            expected = session.prepare_context(
+                ContextPipeline(
                     (
-                        ToolCall("one", "first", "{}"),
-                        ToolCall("two", "second", '{"value":2}'),
-                    ),
-                ),
+                        ToolResultBudgetPolicy(
+                            individual_limit=300,
+                            aggregate_limit=300,
+                        ),
+                    )
+                )
             )
+            session.close()
 
-            rows = [json.loads(line) for line in path.read_text().splitlines()]
-            output_rows = [row for row in rows if row["type"] == "model.output"]
+            resumed = Session.resume(path)
+            actual = ModelContextProjector(resumed.transcript).project()
+            resumed.close()
 
-            self.assertEqual(len(output_rows), 1)
-            self.assertEqual(
-                [call["id"] for call in output_rows[0]["payload"]["tool_calls"]],
-                ["one", "two"],
-            )
-            self.assertFalse(any(row["type"] == "tool.calls" for row in rows))
+        self.assertEqual(actual, expected)
 
-    def test_resume_rejects_old_schema_and_corrupt_completed_records(self) -> None:
+    def test_other_schema_versions_are_rejected_without_migration(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "old.jsonl"
             path.write_text(
                 json.dumps(
                     {
-                        "schema_version": 3,
+                        "schema_version": 4,
                         "sequence": 0,
-                        "event_id": "event",
-                        "recorded_at": "now",
-                        "type": "session.started",
-                        "payload": {},
+                        "event_id": "old",
+                        "recorded_at": "2026-01-01T00:00:00Z",
+                        "type": "session.opened",
+                        "payload": {
+                            "session_id": "old",
+                            "instructions": None,
+                        },
                     }
                 )
                 + "\n"
             )
-            with self.assertRaises(TranscriptCorruptError):
-                Transcript.resume(path)
+            with self.assertRaisesRegex(
+                TranscriptCorruptError,
+                "unsupported transcript schema version",
+            ):
+                TranscriptStore.resume(path)
 
-    def test_invalid_reference_is_rejected_before_write(self) -> None:
+    def test_exclusive_writer_and_expected_revision_guard(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "session.jsonl"
-            transcript = Transcript.create(system_prompt=None, path=path)
-            size = path.stat().st_size
-
-            with self.assertRaises(TranscriptCorruptError):
-                transcript.append(ToolResult("result", "missing", "call", "raw"))
-
-            self.assertEqual(path.stat().st_size, size)
-            self.assertEqual(transcript.revision, 1)
-
-    def test_failed_append_does_not_publish_and_poisons_writer(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "session.jsonl"
-            transcript = Transcript.create(system_prompt=None, path=path)
-            real_open = os.open
-
-            def fail_append(raw_path, flags, mode=0o777):  # type: ignore[no-untyped-def]
-                if flags & os.O_APPEND:
-                    raise OSError("disk full")
-                return real_open(raw_path, flags, mode)
-
-            with patch("alpha_forge.transcript.os.open", side_effect=fail_append):
-                with self.assertRaises(TranscriptPersistenceError):
-                    transcript.append(UserMessage("turn", None, "hello"))
-
-            self.assertEqual(transcript.revision, 1)
+            store = TranscriptStore.create(instructions=None, path=path)
             with self.assertRaises(TranscriptPersistenceError):
-                transcript.append(UserMessage("turn", None, "hello"))
+                TranscriptStore.resume(path)
+            with self.assertRaisesRegex(
+                TranscriptPersistenceError,
+                "stale transcript revision",
+            ):
+                store.append(
+                    InputAccepted("prompt", "hello"),
+                    expected_revision=0,
+                )
+            store.close()
+
+    def test_replay_indexes_are_exposed_as_read_snapshots(self) -> None:
+        store = TranscriptStore.in_memory(instructions=None)
+        visible = store.state
+        visible.event_ids.clear()
+        visible.session = None
+
+        self.assertEqual(store.revision, 1)
+        self.assertIsNotNone(store.state.session)
+        store.close()
+
+    def test_incomplete_final_fragment_is_repaired(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            store = TranscriptStore.create(instructions=None, path=path)
+            store.close()
+            with path.open("ab") as stream:
+                stream.write(b'{"schema_version":1')
+
+            resumed = TranscriptStore.resume(path)
+            self.assertEqual(resumed.revision, 1)
+            resumed.close()
+            self.assertTrue(path.read_bytes().endswith(b"\n"))
+
+    def test_failed_wal_append_never_updates_visible_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            store = TranscriptStore.create(instructions=None, path=path)
+            revision = store.revision
+            with patch(
+                "alpha_forge.transcript.store.os.write",
+                side_effect=OSError("disk full"),
+            ):
+                with self.assertRaisesRegex(
+                    TranscriptPersistenceError,
+                    "disk full",
+                ):
+                    store.append(
+                        InputAccepted("prompt", "hello"),
+                        expected_revision=revision,
+                    )
+            self.assertEqual(store.revision, revision)
+            self.assertIsNone(store.state.active_prompt_event_id)
+            with self.assertRaisesRegex(
+                TranscriptPersistenceError,
+                "earlier write failure",
+            ):
+                store.append(
+                    InputAccepted("prompt", "retry"),
+                    expected_revision=revision,
+                )
+            store.close()
 
 
-class ProjectionTests(unittest.TestCase):
-    def test_raw_result_and_limit_replay_exact_model_preview(self) -> None:
-        session = Session(transcript=Transcript.in_memory(system_prompt="system"))
-        turn = session.submit_user("run")
-        output = session.add_assistant_message(
-            turn_id=turn,
-            response=ModelResponse(
-                None,
-                (ToolCall("call", "tool", "{}"),),
-                finish_reason="tool_calls",
-            ),
+class TranscriptProtocolTests(unittest.TestCase):
+    def test_model_output_is_atomic_but_tool_results_are_flat(self) -> None:
+        session = Session.create(in_memory=True)
+        prompt = session.accept_prompt("use both")
+        calls = (
+            ToolCall("one", "a", "{}"),
+            ToolCall("two", "b", "{}"),
         )
-        raw = session.add_tool_result(
-            output_id=output.output_id,
-            call_id="call",
-            content="HEAD" + "x" * 20_000 + "TAIL",
-            failed=False,
+        output = session.record_model_output(
+            prompt.event_id,
+            ProviderOutput(calls, "tool_calls"),
         )
-        edit = _finalize(session, output.output_id, (raw,))
-
-        messages = ModelHistoryProjector(session.transcript).messages(head_turn_id=turn)
-        tool_message = messages[-1]
-        expected = ToolResultPromptEditor.render(
-            RawToolResult(
-                raw.result_id,
-                raw.call_id,
-                raw.content,
-                raw.failed,
-            ),
-            edit.decisions[0],
-        )
-        self.assertEqual(tool_message.content, expected)  # type: ignore[attr-defined]
-        self.assertIn("transcript_ref", expected)
-        self.assertTrue(
-            any(isinstance(e, ToolResult) for e in session.transcript.events)
-        )
-        self.assertTrue(
-            any(isinstance(e, ToolResultEdit) for e in session.transcript.events)
-        )
-
-    def test_model_projection_selects_only_root_to_head_ancestry(self) -> None:
-        session = Session(transcript=Transcript.in_memory(system_prompt=None))
-        first = session.submit_user("first")
-        session.add_assistant_message(
-            turn_id=first,
-            response=ModelResponse("one"),
-        )
-        abandoned = session.submit_user("abandoned")
-        session.add_assistant_message(
-            turn_id=abandoned,
-            response=ModelResponse("old"),
-        )
-        session.select_head(first)
-        branch = session.submit_user("branch")
-        session.add_assistant_message(
-            turn_id=branch,
-            response=ModelResponse("new"),
-        )
-
-        self.assertEqual(
-            [message.content for message in session.messages],  # type: ignore[attr-defined]
-            ["first", "one", "branch", "new"],
-        )
-
-    def test_explicit_none_parent_starts_an_independent_root(self) -> None:
-        session = Session(transcript=Transcript.in_memory(system_prompt=None))
-        first = session.submit_user("first")
-        session.add_assistant_message(
-            turn_id=first,
-            response=ModelResponse("one"),
-        )
-        second_root = session.submit_user("new root", parent_turn_id=None)
-        session.add_assistant_message(
-            turn_id=second_root,
-            response=ModelResponse("two"),
-        )
-
-        self.assertEqual(
-            [message.content for message in session.messages],  # type: ignore[attr-defined]
-            ["new root", "two"],
-        )
-
-    def test_ui_projector_is_flat_and_filters_raw_unlimited_results(self) -> None:
-        session = Session(transcript=Transcript.in_memory())
-        turn = session.submit_user("run")
-        output = session.add_assistant_message(
-            turn_id=turn,
-            response=ModelResponse(
-                None,
-                (ToolCall("call", "tool", "{}"),),
-            ),
-        )
-        raw = session.add_tool_result(
-            output_id=output.output_id,
-            call_id="call",
-            content="raw",
-            failed=False,
-        )
-        before = UiHistoryProjector(session.transcript).items(head_turn_id=turn)
-        self.assertTrue(any(isinstance(item, UiModelOutput) for item in before))
-        self.assertFalse(any(isinstance(item, UiToolResult) for item in before))
-
-        _finalize(session, output.output_id, (raw,))
-        after = UiHistoryProjector(session.transcript).items(head_turn_id=turn)
-        self.assertTrue(any(isinstance(item, UiToolResult) for item in after))
-
-    def test_command_input_is_audited_but_ui_only_projects_result(self) -> None:
-        session = Session(transcript=Transcript.in_memory())
-        command = session.add_command(
-            raw="/help",
-            name="/help",
-            arguments="",
-        )
-        session.add_command_result(
-            command.command_id,
+        first = session.record_tool_result(
+            model_output_event_id=output.event_id,
+            call_id="one",
             status="success",
-            messages=(CommandMessage("help"),),
+            content="first",
+        )
+        second = session.record_tool_result(
+            model_output_event_id=output.event_id,
+            call_id="two",
+            status="error",
+            content="second",
         )
 
-        items = UiHistoryProjector(session.transcript).items()
-
-        self.assertTrue(any(isinstance(e, Command) for e in session.transcript.events))
-        self.assertTrue(
-            any(isinstance(e, CommandResult) for e in session.transcript.events)
-        )
+        self.assertEqual(session.transcript.state.outputs[output.event_id].items, calls)
         self.assertEqual(
-            [
-                item.message.content
-                for item in items
-                if isinstance(item, UiCommandMessage)
-            ],
-            ["help"],
+            session.transcript.state.results_by_output[output.event_id],
+            {"one": first.event_id, "two": second.event_id},
         )
 
-
-class SessionProtocolTests(unittest.TestCase):
-    def test_session_enforces_tool_protocol_not_transcript(self) -> None:
-        session = Session(transcript=Transcript.in_memory())
-        turn = session.submit_user("run")
-        output = session.add_assistant_message(
-            turn_id=turn,
-            response=ModelResponse(
-                None,
-                (ToolCall("call", "tool", "{}"),),
-            ),
+    def test_duplicate_or_unknown_tool_results_are_rejected(self) -> None:
+        session = Session.create(in_memory=True)
+        prompt = session.accept_prompt("tool")
+        output = session.record_model_output(
+            prompt.event_id,
+            ProviderOutput((ToolCall("one", "a", "{}"),)),
         )
-
-        with self.assertRaises(RuntimeError):
-            session.add_assistant_message(
-                turn_id=turn,
-                response=ModelResponse("too early"),
+        with self.assertRaises(TranscriptCorruptError):
+            session.record_tool_result(
+                model_output_event_id=output.event_id,
+                call_id="unknown",
+                status="success",
+                content="x",
+            )
+        session.record_tool_result(
+            model_output_event_id=output.event_id,
+            call_id="one",
+            status="success",
+            content="x",
+        )
+        with self.assertRaises(TranscriptCorruptError):
+            session.record_tool_result(
+                model_output_event_id=output.event_id,
+                call_id="one",
+                status="success",
+                content="again",
             )
 
-        raw = session.add_tool_result(
-            output_id=output.output_id,
-            call_id="call",
-            content="done",
-            failed=False,
-        )
-        _finalize(session, output.output_id, (raw,))
-        session.add_assistant_message(
-            turn_id=turn,
-            response=ModelResponse("finished"),
-        )
-
-    def test_recovery_requeues_missing_results_without_session_writes(self) -> None:
-        session = Session(transcript=Transcript.in_memory())
-        turn = session.submit_user("run")
-        session.add_assistant_message(
-            turn_id=turn,
-            response=ModelResponse(
-                None,
+    def test_tool_results_must_follow_provider_call_order(self) -> None:
+        session = Session.create(in_memory=True)
+        prompt = session.accept_prompt("tools")
+        output = session.record_model_output(
+            prompt.event_id,
+            ProviderOutput(
                 (
-                    ToolCall("one", "tool", "{}"),
-                    ToolCall("two", "tool", "{}"),
-                ),
+                    ToolCall("first", "tool", "{}"),
+                    ToolCall("second", "tool", "{}"),
+                )
             ),
         )
+        with self.assertRaisesRegex(
+            TranscriptCorruptError,
+            "call order",
+        ):
+            session.record_tool_result(
+                model_output_event_id=output.event_id,
+                call_id="second",
+                status="success",
+                content="out of order",
+            )
 
-        pending = session.recover_unfinished_turns()
-
-        self.assertEqual(
-            [(item.turn_id, item.content) for item in pending], [(turn, "run")]
+    def test_visibility_targets_old_exchange_by_event_id_not_time(self) -> None:
+        session = Session.create(in_memory=True)
+        first_prompt = session.accept_prompt("old query")
+        tool_output = session.record_model_output(
+            first_prompt.event_id,
+            ProviderOutput((ToolCall("call", "tool", "{}"),)),
         )
-        results = [
-            event
-            for event in session.transcript.events
-            if isinstance(event, ToolResult)
-        ]
-        self.assertEqual(results, [])
+        result = session.record_tool_result(
+            model_output_event_id=tool_output.event_id,
+            call_id="call",
+            status="success",
+            content="raw",
+        )
+        session.record_model_output(first_prompt.event_id, _answer("old done"))
+        second_prompt = session.accept_prompt("new query")
+        session.record_model_output(second_prompt.event_id, _answer("new done"))
+
+        session.transcript.append(
+            ContextEdited(
+                PolicyInvocation(
+                    "future_context_occupation_policy",
+                    1,
+                    {"occupation_ratio": 0.92},
+                ),
+                (SetToolExchangeVisibility(tool_output.event_id, False),),
+            ),
+            expected_revision=session.revision,
+        )
+
+        model = ModelContextProjector(session.transcript).project()
+        ui = UiHistoryProjector(session.transcript).items()
+        model_ids = {
+            item.output_event_id
+            for item in model.items
+            if hasattr(item, "output_event_id")
+        }
+        self.assertNotIn(tool_output.event_id, model_ids)
         self.assertFalse(
             any(
-                isinstance(event, ToolResultEdit)
-                for event in session.transcript.events
+                getattr(item, "result_event_id", None) == result.event_id
+                for item in model.items
             )
         )
-        query_messages = session.query_messages_for_turn(turn)
-        self.assertIsInstance(query_messages[-1], AssistantMessage)
-        self.assertEqual(
-            query_messages[-1].output_id,  # type: ignore[attr-defined]
-            session.transcript.events[-1].output_id,  # type: ignore[attr-defined]
-        )
-
-    def test_session_transition_is_destination_activity(self) -> None:
-        source = Session(transcript=Transcript.in_memory(session_id="source"))
-        command = source.add_command(
-            raw="/clear",
-            name="/clear",
-            arguments="",
-        )
-        destination = Session(transcript=Transcript.in_memory(session_id="destination"))
-        destination.add_session_transition(
-            kind="clear",
-            source_session_id=source.session_id,
-            source_command_id=command.command_id,
-        )
-        self.assertIsInstance(destination.transcript.events[-1], SessionTransition)
-
-
-class EphemeralStateTests(unittest.TestCase):
-    def test_active_raw_tool_result_uses_ui_tail_lines(self) -> None:
-        session = Session(transcript=Transcript.in_memory())
-        turn = session.submit_user("run")
-        call = ToolCall("call", "tool", "{}")
-        ui = ChatUiState(
-            _view(session),
-            tool_result_preview=TailLinesUiToolResultPreview(2),
-        )
-        ui.handle(ToolBatchStarted(turn, "output", (call,)))
-        ui.handle(
-            ToolResultRecorded(
-                RawToolResult(
-                    "result",
-                    "call",
-                    "first\nsecond\nthird",
-                )
+        self.assertTrue(
+            any(
+                isinstance(item, UiModelOutput)
+                and item.output_event_id == tool_output.event_id
+                for item in ui
             )
         )
+        projected_result = next(
+            item
+            for item in ui
+            if isinstance(item, UiToolResult)
+            and item.result_event_id == result.event_id
+        )
+        self.assertTrue(projected_result.excluded_from_model)
 
-        self.assertNotIn("first", ui.active_text())
-        self.assertIn("second", ui.active_text())
-        self.assertIn("third", ui.active_text())
-        self.assertIn("Tool result preview", ui.active_text())
-
-    def test_durable_tool_result_uses_same_ui_tail_lines(self) -> None:
-        session = Session(transcript=Transcript.in_memory())
-        turn = session.submit_user("run")
-        output = session.add_assistant_message(
-            turn_id=turn,
-            response=ModelResponse(
-                None,
-                (ToolCall("call", "tool", "{}"),),
+        session.transcript.append(
+            ContextEdited(
+                PolicyInvocation("manual_restore", 1, {}),
+                (SetToolExchangeVisibility(tool_output.event_id, True),),
             ),
+            expected_revision=session.revision,
         )
-        raw = session.add_tool_result(
-            output_id=output.output_id,
+        restored_ids = {
+            item.output_event_id
+            for item in ModelContextProjector(session.transcript).project().items
+            if hasattr(item, "output_event_id")
+        }
+        self.assertIn(tool_output.event_id, restored_ids)
+
+    def test_visibility_cannot_hide_current_exchange_tail_or_noop(self) -> None:
+        session = Session.create(in_memory=True)
+        prompt = session.accept_prompt("query")
+        output = session.record_model_output(
+            prompt.event_id,
+            ProviderOutput((ToolCall("call", "tool", "{}"),)),
+        )
+        session.record_tool_result(
+            model_output_event_id=output.event_id,
             call_id="call",
-            content="first\nsecond\nthird",
-            failed=False,
+            status="success",
+            content="raw",
         )
-        _finalize(session, output.output_id, (raw,))
-        session.add_assistant_message(
-            turn_id=turn,
-            response=ModelResponse("finished"),
-        )
-        ui = ChatUiState(
-            _view(session),
-            tool_result_preview=TailLinesUiToolResultPreview(2),
-        )
-
-        self.assertNotIn("first", ui.transcript_text())
-        self.assertIn("second", ui.transcript_text())
-        self.assertIn("third", ui.transcript_text())
-        self.assertIn("Tool result preview", ui.transcript_text())
-
-    def test_partial_output_is_ui_only_until_session_persists_response(self) -> None:
-        session = Session(transcript=Transcript.in_memory())
-        turn = session.submit_user("hello")
-        ui = ChatUiState(_view(session))
-        ui.handle(ModelResponseStarted(turn, "output"))
-        ui.handle(ReasoningDelta("thinking"))
-        ui.handle(TextDelta("partial"))
-        ui.handle(ToolCallDelta(0, "call", "tool", "{"))
-
-        self.assertIn("partial", ui.active_text())
-        self.assertIn("streaming", ui.active_text())
-        self.assertNotIn("partial", ui.transcript_text())
-        self.assertFalse(
-            any(isinstance(event, ModelOutput) for event in session.transcript.events)
-        )
-
-    def test_completed_response_stays_active_on_persistence_failure(self) -> None:
-        session = Session(transcript=Transcript.in_memory())
-        turn = session.submit_user("hello")
-        ui = ChatUiState(_view(session))
-        response = ModelResponse("complete", finish_reason="stop")
-        ui.handle(ModelResponseStarted(turn, "output"))
-        ui.handle(TextDelta("complete"))
-        ui.handle(ModelResponseCompleted("output", response))
-        ui.handle(PersistenceFailed("model output", "disk full"))
-
-        self.assertEqual(response.content, "complete")
-        self.assertTrue(ui.has_unsaved_active)
-        self.assertIn("not persisted: disk full", ui.active_text())
-
-    def test_mutable_draft_finishes_into_immutable_response(self) -> None:
-        draft = ModelResponseAccumulator()
-        draft.apply(TextDelta("hello"))
-        draft.apply(ToolCallDelta(0, "call", "tool", '{"x":'))
-        draft.apply(ToolCallDelta(0, "", "", "1}"))
-        response = draft.build("tool_calls")
-
-        self.assertEqual(response.content, "hello")
-        self.assertEqual(response.tool_calls[0].arguments, '{"x":1}')
-        self.assertEqual(response.finish_reason, "tool_calls")
+        with self.assertRaises(TranscriptCorruptError):
+            session.transcript.append(
+                ContextEdited(
+                    PolicyInvocation("policy", 1, {}),
+                    (SetToolExchangeVisibility(output.event_id, False),),
+                ),
+                expected_revision=session.revision,
+            )
+        with self.assertRaises(TranscriptCorruptError):
+            session.transcript.append(
+                ContextEdited(PolicyInvocation("policy", 1, {}), ()),
+                expected_revision=session.revision,
+            )
 
 
 if __name__ == "__main__":

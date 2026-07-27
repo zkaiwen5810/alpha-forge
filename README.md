@@ -108,14 +108,10 @@ Design intent:
 
 ### Tool calling
 
-Tool definitions and execution are isolated in `alpha_forge.tools`. The package
-provides:
-
-- `Tool` metadata, including canonical name, aliases, human description,
-  model prompt, JSON input schema, implementation function, and reserved
-  `is_mcp` and `validate_input` extension points.
-- `ToolRegistry` registration, lookup, OpenAI schema generation, and dispatch.
-- `load_builtin_tools()` for loading the tools shipped with Alpha Forge.
+Tool definitions and execution are isolated in `alpha_forge.tools`.
+`ToolRegistry` stores provider-neutral `ToolSpec` values and dispatches calls;
+OpenAI schema generation belongs only to the OpenAI provider adapter.
+`load_builtin_tools()` creates the default registry.
 
 The default registry includes a safe `calculator` tool, a bounded UTF-8
 `file_reader`, a UTF-8 `file_writer`, and a non-interactive `bash` tool. The file
@@ -137,26 +133,18 @@ also applied to singular `CREDENTIAL`. It is defense in depth, not a sandbox:
 Bash commands retain the Alpha Forge process user's filesystem and network
 permissions and can read any accessible files.
 
-The stateless `QueryEngine` receives explicit OpenAI Chat Completions messages,
-tool definitions, and a tool executor. It continues its prompt-local loop until
-the model produces a response without tool calls. It retains no session or
-transcript reference, and a query stops with an error after 10 tool rounds.
+The stateless `QueryEngine` uses an effect/feedback protocol. Before each
+provider request it asks the coordinator for a freshly projected committed
+context. Model outputs and individual tool results also require durable commit
+feedback before the loop can advance. The engine retains no session,
+transcript, or mutable completed-history copy and stops after 10 tool rounds.
 
-At the beginning of every query iteration, a prompt-editor strategy constructs
-the exact messages for the next OpenAI request. Raw tool results remain
-unmodified in application-only tool messages until this pre-request boundary.
-For an interrupted exchange, a missing-result policy first creates durable
-failure results for calls without a recorded result. The default model-facing
-policy then bounds one result to at most 16,000 Unicode characters and one
-model output's results to at most 32,000 characters in aggregate. When
-multiple results exceed the aggregate limit, Alpha Forge shares the available
-space fairly while leaving results that already fit their share unchanged.
-
-An oversized result is projected as a self-identifying preview containing the
-beginning and end of the result, the original character count, the truncation
-reason, and a stable transcript result reference. The complete raw result and
-the exact versioned prompt-edit decision remain in the same self-contained
-transcript.
+The default serial context policy bounds one projected tool result to 16,000
+Unicode characters and the latest tool exchange to 32,000 characters in
+aggregate. It appends `context.edited` only when the projection actually
+changes. Raw results remain intact in the transcript; oversized results are
+reconstructed as deterministic, self-identifying head/tail previews containing
+a stable result event reference.
 The default layout is:
 
 ```text
@@ -168,114 +156,76 @@ When `XDG_DATA_HOME` is unset, the base directory is
 and synced before it becomes visible as completed history. New transcript
 directories and files use modes `0700` and `0600`.
 
-`/resume PATH` validates and opens a transcript, rebuilds model/UI history, and
-requeues safely recoverable unfinished turns. It never reruns a tool call whose
-side effect may already have happened. The requeued query detects missing tool
-messages, persists interruption failures for them, and commits the
-model-facing edit immediately before the model continues. The session-aware
-`tool_result_reader` tool can consume a preview's `transcript_ref` in bounded
-character ranges. `/resume` and `/clear` share the input FIFO, so they run
-after earlier work and select the session used by later queued inputs.
+`/resume PATH` validates and opens a transcript without changing it. If the
+latest provider output has missing tool results, resumed query continuation
+first persists one `interrupted` result per absent call; it never reruns a call
+whose side effect may already have happened. Context preparation runs only
+after the exchange is complete. The session-aware `tool_result_reader` pages
+raw results by `result_event_id`. `/resume` and `/clear` share the input FIFO,
+so they select the session used by later queued inputs.
 
 To build a controller with a custom registry:
 
 ```python
-from alpha_forge.repl_controller import ChatReplController
+from alpha_forge.application import ApplicationCoordinator
 from alpha_forge.tools import Tool, ToolRegistry
 
 registry = ToolRegistry([
     Tool(
         name="greet",
         aliases=("hello",),
-        description="Returns a greeting for a person.",
-        prompt="Use this to create a greeting for a named person.",
+        display_description="Returns a greeting for a person.",
+        description="Use this to create a greeting for a named person.",
         input_schema={
             "type": "object",
             "properties": {"name": {"type": "string"}},
             "required": ["name"],
             "additionalProperties": False,
         },
-        function=lambda arguments: f"Hello, {arguments['name']}!",
+        handler=lambda arguments: f"Hello, {arguments['name']}!",
     )
 ])
-controller = ChatReplController(config, tool_registry=registry)
+coordinator = ApplicationCoordinator(config, tool_registry=registry)
 ```
-
-`is_mcp` and `validate_input` are definition-only in this release; MCP
-execution and custom validator invocation are intentionally deferred.
 
 ### Transcript and history projections
 
 See [the transcript architecture](docs/transcript-architecture.md) for the
-event catalog, layer boundaries, persistence flow, and branch model.
+event catalog, context operations, recovery boundary, and persistence flow.
 
-`alpha_forge.transcript` owns the versioned event schema and append-only JSONL
-store. Its v4 schema is a flat semantic activity ledger: session starts and
-transitions, user messages, commands and command results, model outputs, raw
-tool results, prompt-edit decisions, and turn failures. A `ModelOutput`
-is atomic and contains its ordered tool calls. Transport chunks, start markers,
-progress updates, and commit markers are not transcript activities.
+`alpha_forge.transcript` owns a completely new schema-v1 append-only JSONL
+ledger. Its durable events are `session.opened`, `session.linked`,
+`input.accepted`, `command.completed`, `model.output`, `tool.result`,
+`context.edited`, and `query.failed`. A `ModelOutput` atomically contains the
+ordered provider output items and all requested `ToolCall` values; tool results
+are appended individually as calls finish. Records from other schema versions
+are rejected.
 
-`alpha_forge.session` is the exclusive protocol-aware writer and owns lifecycle
-and crash recovery. The transcript validates only record structure and
-references. `alpha_forge.model_history.ModelHistoryProjector` and
-`alpha_forge.ui_history.UiHistoryProjector` independently derive model and UI
-facts directly from the ledger; there is no shared reconstructed turn graph or
-second completed-history list. The model projector emits only complete
-protocol history. The UI projector emits flat durable presentation facts, and
-`ChatUiState` groups those facts for display. Small completed values shared by
-these layers, such as tool calls and token usage, live in
-`alpha_forge.models`; streaming state does not leak into the transcript layer.
-Internal assistant and tool messages carry output/result IDs and raw/finalized
-state for prompt policies; those application fields are omitted from OpenAI
-request dictionaries.
+The ledger is linear. There are no turns, branches, parent event chains, or
+created-time visibility rules. Query protocol follows sequence order:
+`input.accepted` opens a prompt, intermediate model outputs request tools, and
+a model output without tools or `query.failed` closes it.
 
-All prompts and slash commands use one in-memory FIFO. An item is appended to
-the then-current session immediately before it is processed; waiting items are
-not durable. This lets `/clear` and `/resume` deterministically select the
-session used by later queued inputs. Each user message records a parent turn
-ID. Projections select the root-to-head ancestry, which establishes
-branch-capable storage while the current terminal UI still presents one
-selected branch.
+Provider and UI projectors independently derive normalized values directly
+from committed records. The model projector applies context operations; the UI
+projector continues to show raw history. `SetToolResultRepresentation` selects
+a deterministic raw or preview form. `SetToolExchangeVisibility` can exclude
+or restore a whole completed intermediate tool exchange by model-output event
+ID. The visibility type is present for future compaction, but no automatic
+visibility policy is enabled; a future policy must use measured context
+occupation rather than event age.
 
-Partial assistant text, reasoning, refusals, usage, and function-call arguments
-exist only in a UI-owned mutable draft while the provider stream is open. The
-terminal renders that draft in a conditional tail pane capped at roughly one
-third of the screen; the durable transcript pane remains unchanged and
-independently scrollable. F3 copies only durable transcript history. A failed
-stream discards its draft. Once the stream ends, the query emits an immutable
-response. The controller first exposes it as ephemeral presentation state,
-commits it through `Session`, then publishes a new immutable session view. If
-the response cannot be persisted, the query stops and the active pane retains
-it with an explicit unsaved error. Input processing also stops at that WAL
-failure so later queued work cannot run from state that was never durable.
+All prompts and slash commands use one in-memory FIFO. Waiting items are
+intentionally not durable. A dequeued item is written to the then-current
+session before handling, allowing `/clear` and `/resume` to deterministically
+select the session for later items.
 
-The history panel groups flat projected facts by user turn. This remains correct
-when several user messages are submitted while an earlier response streams:
-the projector supplies each model request only completed earlier turns plus its
-own user message, excluding later queued prompts.
-
-Within a turn, tool calls and results are indented and rendered without blank
-lines. Incomplete tool-call IDs, names, and arguments render from the active
-draft. Completed model outputs become durable before execution starts. Each
-raw tool result is appended immediately after that tool returns, while a
-presentation-only view of its last 20 lines appears in the active pane. At the
-beginning of the following iteration, `tool.result_edit` records the exact
-reproducible model-facing results in call order and clears the active pane
-before the next OpenAI request starts. Durable model-facing results pass
-through the same UI-only last-20-lines policy when rendered.
-
-Slash commands are durable activities too and share the same FIFO as prompts.
-The source transcript records the raw command and its structured result; the UI
-displays only result messages.
-`/clear` and `/resume` additionally put a transition activity in the
-destination transcript, linking it to the source session and command.
-
-Text from a tool-requesting model output is retained beneath its tool result as an
-italic cyan `Assistant note`. Separate turns and command notices have one blank
-line between their blocks. When the provider includes token usage, the latest
-model output of the latest turn ends with a right-aligned summary such as
-`Total tokens: 1,555 | Prompt cache: 72% reused`.
+Partial output text, reasoning, refusals, usage, and tool-call arguments are
+UI-owned ephemeral state. A completed model output is committed before any tool
+starts, and each tool result is committed before the next call. Every commit
+publishes a new immutable session view. A WAL failure stops provider/tool
+progress and later input processing so the application cannot continue from
+state that was never durable.
 
 ## Local secrets
 

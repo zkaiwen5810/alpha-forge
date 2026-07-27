@@ -14,66 +14,69 @@ def _echo(arguments):  # type: ignore[no-untyped-def]
 
 
 class ToolRegistryTests(unittest.TestCase):
-    def test_registers_gets_aliases_and_builds_openai_definition(self) -> None:
-        validator_calls: list[object] = []
+    def test_registers_gets_aliases_and_exposes_provider_neutral_spec(self) -> None:
         tool = Tool(
             name="echo",
             aliases=("repeat",),
-            is_mcp=True,
-            description="Human-facing description.",
-            prompt="Model-facing instructions.",
+            display_description="Human-facing description.",
+            description="Model-facing instructions.",
             input_schema={
                 "type": "object",
                 "properties": {"value": {"type": "string"}},
                 "required": ["value"],
                 "additionalProperties": False,
             },
-            validate_input=validator_calls.append,  # type: ignore[arg-type]
-            function=_echo,
+            handler=_echo,
         )
         registry = ToolRegistry([tool])
 
         self.assertIs(registry.get("echo"), tool)
         self.assertIs(registry.get("repeat"), tool)
         self.assertEqual(registry.execute("repeat", {"value": "hello"}), "hello")
-        self.assertEqual(validator_calls, [])
-        self.assertTrue(tool.is_mcp)
-        self.assertEqual(
-            registry.definitions(),
-            [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "echo",
-                        "description": "Model-facing instructions.",
-                        "parameters": tool.input_schema,
-                    },
-                }
-            ],
-        )
+        self.assertEqual(registry.specs(), (tool.spec,))
+        self.assertEqual(tool.spec.name, "echo")
+        self.assertEqual(tool.spec.description, "Model-facing instructions.")
 
     def test_rejects_collisions_and_unknown_tools(self) -> None:
         first = Tool(
             name="first",
             aliases=("shared",),
             description="First",
-            prompt="First",
             input_schema={"type": "object"},
-            function=lambda _arguments: "first",
+            handler=lambda _arguments: "first",
         )
         registry = ToolRegistry([first])
         second = Tool(
             name="shared",
             description="Second",
-            prompt="Second",
             input_schema={"type": "object"},
-            function=lambda _arguments: "second",
+            handler=lambda _arguments: "second",
         )
 
         with self.assertRaises(ValueError):
             registry.register(second)
         with self.assertRaises(ToolNotFoundError):
             registry.get("missing")
+
+    def test_tool_spec_copies_and_freezes_its_json_schema(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+        }
+        tool = Tool(
+            name="echo",
+            description="echo",
+            input_schema=schema,
+            handler=_echo,
+        )
+        schema["properties"]["value"]["type"] = "number"
+
+        self.assertEqual(
+            tool.input_schema["properties"]["value"]["type"],
+            "string",
+        )
+        with self.assertRaises(TypeError):
+            tool.input_schema["new"] = {}  # type: ignore[index]
 
 
 class CalculatorTests(unittest.TestCase):

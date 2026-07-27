@@ -24,10 +24,10 @@ from prompt_toolkit.output.base import Output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
+from alpha_forge.application.coordinator import ApplicationCoordinator
+from alpha_forge.application.events import ExitReady
 from alpha_forge.events import Event
-from alpha_forge.repl_controller import ChatReplController
 from alpha_forge.slash_commands import SLASH_COMMANDS
-from alpha_forge.system_events import ExitReady
 from alpha_forge.ui_state import ChatUiState
 
 
@@ -57,7 +57,7 @@ class HistoryControl(UIControl):
 class TerminalChatUi:
     def __init__(
         self,
-        controller: ChatReplController,
+        controller: ApplicationCoordinator,
         *,
         input: Input | None = None,
         output: Output | None = None,

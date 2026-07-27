@@ -1,12 +1,12 @@
 """Bounded public API for Alpha Forge tools."""
 
 from alpha_forge.tools.base import (
-    InputValidator,
     Tool,
     ToolError,
     ToolExecutionError,
-    ToolFunction,
+    ToolHandler,
     ToolNotFoundError,
+    ToolSpec,
 )
 from alpha_forge.tools.bash import (
     BASH_TOOL,
@@ -24,6 +24,11 @@ from alpha_forge.tools.file_reader import (
 )
 from alpha_forge.tools.file_writer import FILE_WRITER_TOOL, write_file
 from alpha_forge.tools.registry import ToolRegistry
+from alpha_forge.tools.execution import (
+    ExecutedToolResult,
+    ToolCallExecutor,
+    ToolExecutor,
+)
 
 __all__ = [
     "BASH_TOOL",
@@ -34,13 +39,16 @@ __all__ = [
     "MAX_BASH_TIMEOUT_SECONDS",
     "MAX_FILE_READ_CHARS",
     "MIN_BASH_TIMEOUT_SECONDS",
-    "InputValidator",
+    "ExecutedToolResult",
     "Tool",
+    "ToolCallExecutor",
     "ToolError",
     "ToolExecutionError",
-    "ToolFunction",
+    "ToolExecutor",
+    "ToolHandler",
     "ToolNotFoundError",
     "ToolRegistry",
+    "ToolSpec",
     "load_builtin_tools",
     "read_file",
     "run_bash",

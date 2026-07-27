@@ -1,114 +1,183 @@
-# Query, session, and transcript architecture
+# Transcript, context, and query architecture
 
-Alpha Forge separates stateless query execution from stateful session
-persistence. The transcript is the only durable source of completed chat
-history. It is a schema-v4 JSONL write-ahead activity ledger: each record is
-appended, flushed, and synced before the query is allowed to continue.
+Alpha Forge uses one linear schema-v1 transcript as the durable authority for
+both provider context and UI history. Completed model-facing contents are not
+stored in a second history list. Projectors normalize the ledger independently
+for each consumer.
 
-## Boundaries
+## Package boundaries
 
-- `chat.py` adapts OpenAI Chat Completions streams into provider-neutral model
-  deltas and one authoritative completed response. It receives explicit
-  messages and has no session state.
-- `query.py` owns the multi-round model/tool loop. `QueryEngine.run()` receives
-  a `QueryRequest` and emits typed events from an async generator. All mutable
-  prompt state is local to that generator.
-- `tool_execution.py` parses and executes complete tool calls. It returns raw
-  results and has no persistence or prompt-editing responsibility.
-- `prompt_editor.py` defines the pre-request prompt-editor strategy contract.
-  Its default policies synthesize failures for missing tail results, apply the
-  versioned tool-result budget, and return persistence effects plus exact
-  outgoing messages.
-- `transcript.py` defines semantic activities, JSONL storage, and structural
-  reference validation. It has no query, tool, or UI dependency.
-- `session.py` is the exclusive transcript writer. It enforces protocol order,
-  selects a branch head, applies durable query events, and performs recovery.
-- `model_history.py` projects one root-to-head branch into complete model
-  history or canonical query messages containing an unfinished raw tail.
-- `ui_history.py` projects the same branch into immutable presentation facts.
-- `repl_controller.py` serializes all user inputs, maps query events to session
-  commits, and publishes application events.
-- `ui_state.py` is a presentation reducer. It consumes immutable session views
-  and ephemeral progress events, applying its own last-20-lines tool-result
-  policy; it never references `Session` or `Transcript`.
+- `providers` owns provider-neutral completed output and stream values.
+  `OpenAIChatAdapter` is the default adapter and is the only layer that
+  translates these values to OpenAI Chat Completions dictionaries.
+- `transcript` owns the schema-v1 event catalog, strict codec, protocol replay
+  validation, and exclusive JSONL writer.
+- `projectors` derives provider context, recovery state, and flat UI facts from
+  committed transcript records.
+- `context` owns immutable provider-context values and ordered context-edit
+  policies. It does not execute tools or call a provider.
+- `query` owns the stateless multi-request provider/tool loop. It requests
+  context and durable commits through an effect/feedback protocol.
+- `tools` owns provider-neutral tool specifications, lookup, and execution.
+- `sessions` is the application transcript-write boundary. It exposes
+  commands and projections, not a mutable message list.
+- `application` owns the FIFO and coordinates session, commands, context,
+  query, tools, and reactive presentation events.
+- `ui_state` reduces durable session views plus ephemeral streaming progress.
 
-The query engine imports no session, transcript, command, controller, or UI
-types. The terminal UI owns its reducer and subscribes to controller events.
+The dependency direction is toward small value and protocol modules. The query
+engine has no transcript, session, command, coordinator, or UI reference.
 
-## Durable activities
+## Record envelope
 
-| Event | Meaning |
+Every JSONL line is one record:
+
+```json
+{
+  "schema_version": 1,
+  "sequence": 0,
+  "event_id": "stable-unique-id",
+  "recorded_at": "2026-07-27T12:00:00Z",
+  "type": "session.opened",
+  "payload": {}
+}
+```
+
+`sequence` starts at zero and is contiguous. Event IDs are unique. Timestamps
+are audit metadata only; protocol order and context visibility never depend on
+wall-clock time. This is a completely new schema: records with any schema
+version other than 1 are rejected and no legacy migration is attempted.
+
+The writer validates a candidate against replay state, writes one compact line,
+flushes it with `fsync`, and only then exposes the new revision to in-process
+readers. It holds an exclusive file lock. A stale expected revision, invalid
+protocol transition, or write failure cannot publish a partial in-memory
+state. An incomplete final JSONL fragment can be removed during resume; a
+malformed completed line makes the transcript corrupt.
+
+## Durable event catalog
+
+| Type | Atomic payload and responsibility |
 | --- | --- |
-| `session.start` | Session identity and system prompt |
-| `session.transition` | `/clear` or `/resume` link to the source session |
-| `user.message` | Complete prompt plus parent turn |
-| `user.command` | Raw slash-command input and parsed fields |
-| `command.result` | Structured visible command outcome |
-| `model.output` | One completed response with ordered tool calls |
-| `tool.result` | One complete, uncapped raw application result |
-| `tool.result_edit` | Versioned prompt-edit decisions and batch completion |
-| `turn.failure` | Durable terminal failure |
+| `session.opened` | Session ID and optional instructions; exactly one at sequence 0 |
+| `session.linked` | `/clear` or `/resume` link to a source session and command event |
+| `input.accepted` | Prompt text, or raw command plus parsed name and arguments |
+| `command.completed` | One command status and its ordered visible messages |
+| `model.output` | One provider response: ordered output items, finish reason, and usage |
+| `tool.result` | One raw result for one call, appended immediately after that call |
+| `context.edited` | One policy invocation and an atomic list of declarative operations |
+| `query.failed` | Terminal prompt failure with a classified stage and message |
 
-Transport deltas, progress updates, queue state, and commit notifications are
-ephemeral application events.
+Provider transport chunks, request-start markers, tool-start markers, queue
+state, view changes, and commit acknowledgements are ephemeral application
+events. They are not required to reconstruct model or UI history.
 
-## Query and commit flow
+`model.output` remains atomic because one provider response may request
+multiple tools. Its output items use provider-oriented names:
 
-1. The FIFO controller dequeues an input and appends its user or command
-   activity to the then-current session before performing its effects.
-2. For a prompt, the session projects canonical messages, including any
-   unfinished assistant/raw-tool tail, while the controller creates a
-   query-scoped tool runtime. The transcript reader tool is bound to that
-   captured session.
-3. At the beginning of each iteration, prompt policies construct the exact
-   outgoing messages. Missing calls become ordinary failed raw-result events;
-   those events and the final edit are committed before the model client can
-   be called.
-4. `QueryEngine` streams model deltas for presentation and emits a completed
-   model-round event.
-5. The controller lets the UI retain the authoritative completed response,
-   commits the event through `Session.apply_query_event`, then publishes a new
-   immutable `SessionView`.
-6. If the response requests tools, the query executes calls sequentially.
-   Every raw result is committed before the generator advances, then UI state
-   displays its last 20 lines.
-7. Raw results remain in application-only tool messages until the following
-   iteration applies prompt policies. A response without tool calls completes
-   the query.
+- `OutputMessage`, containing `OutputText` and/or `OutputRefusal`
+- `ReasoningItem`
+- `ToolCall`, identified by `call_id`
 
-Because an async generator does not advance until the consumer asks for the
-next item, the controller/session boundary is the commit acknowledgement. A
-persistence failure closes the query before another provider request or tool
-can run. The UI retains the completed response or bounded tool preview and
-marks it as unsaved. The controller also stops accepting and processing later
-FIFO items because their durable parent state is no longer trustworthy; an
-orderly exit remains available.
+Tool calls are not flattened into separate transcript records. Tool results
+are flat because calls execute sequentially and each completed result must be
+durable before the next side effect begins. `ToolResult.call_id` supplies the
+correlation; UI naming does not leak into the provider value model.
 
-## Tool results and recovery
+There are no turns, branches, turn IDs, or parent-event chains. A prompt opens
+one query in ledger order. Model outputs and tool results extend that open
+query until a model output without calls or a `query.failed` event closes it.
+This is the smallest ordering model needed for the current sequential app.
 
-The WAL stores the complete raw result once plus compact edit metadata. Model
-and UI projections reconstruct the exact bounded representation with the
-recorded policy version and limits. Oversized previews include a stable
-`transcript_ref`; the session-scoped `tool_result_reader` pages the raw result.
+## Context edits
 
-Raw results are appended immediately but remain absent from completed model/UI
-history until `tool.result_edit` closes the batch. On resume, an unfinished
-batch is never executed again. The session only requeues the turn and projects
-its recorded raw results. The query's missing-result policy creates and
-persists interruption failures for absent calls, then the model-facing policy
-creates and commits the batch edit before continuation.
+A `context.edited` event records:
 
-## FIFO and branches
+```text
+policy = {name, version, parameters}
+operations = [operation, ...]
+```
 
-All submitted prompts and slash commands share one in-memory FIFO. Waiting
-items are intentionally not durable. Each item is written to the selected
-session only when dequeued, so `/clear` and `/resume` can deterministically
-choose the session for later inputs. `/exit` and Ctrl-C stop accepting new
-inputs, allow earlier items to finish, then exit.
+The event exists only when at least one operation changes projected context.
+The default policy therefore emits no event when every tool result already
+fits its limits.
 
-Every `UserMessage` has a `parent_turn_id`. Both durable projectors walk the
-selected root-to-head ancestry. Storage remains branch-capable even though the
-terminal currently exposes one selected head.
+Schema v1 defines two operation types:
 
-Schema v3 files are intentionally rejected; this project does not provide a
-compatibility migration during its pre-public stage.
+- `SetToolResultRepresentation(result_event_id, representation)` selects
+  either the original result or deterministic version-1 head/tail preview
+  metadata. Raw tool content is never copied into the edit event.
+- `SetToolExchangeVisibility(model_output_event_id, visible)` excludes or
+  restores an entire completed intermediate tool exchange—its tool-calling
+  model output and correlated results—as one protocol-safe unit.
+
+Operations target durable event IDs, so a future compaction policy can hide an
+intermediate provider output from a query days earlier without knowing a turn
+number or rewriting historical records. Replay folds later operations over the
+same target. An edit cannot target an unknown result/output, repeat a slot in
+one event, be a no-op, hide an incomplete exchange, or hide the current query
+tail.
+
+`SetToolExchangeVisibility` is intentionally only a schema capability today.
+No automatic visibility policy is installed. When one is added, its decision
+must use measured context occupation (for example token or context-window
+pressure), never record creation time or age.
+
+Policies run serially at provider-request preparation. After a policy returns
+operations, the coordinator durably appends them and reprojects before
+evaluating the next policy. Consequently each policy sees the committed output
+of all earlier policies.
+
+## Query effect and feedback flow
+
+One accepted prompt follows this loop:
+
+1. The query yields `PrepareContext`.
+2. The coordinator runs context policies, commits non-noop edits, projects the
+   resulting transcript, and sends `ContextPrepared` feedback.
+3. The query streams one provider request and emits progress for the UI.
+4. The query yields `CommitModelOutput`; it cannot advance until the
+   coordinator sends `ModelOutputCommitted` with the assigned event ID and
+   committed revision.
+5. If the output contains tool calls, calls execute sequentially. Each
+   `CommitToolResult` similarly requires `ToolResultCommitted` feedback.
+6. The loop returns to context preparation and may request the provider again.
+   A response without calls completes the query.
+
+The query engine never appends to a local completed-message list and never
+applies a context edit itself. The context snapshot received as feedback is
+the exact input to one provider request and is discarded before the next
+iteration. This prevents transcript projection and a query-local copy from
+diverging.
+
+## Recovery and missing tool results
+
+Resume first opens, validates, and projects the transcript. Semantic recovery
+does not execute tools or synthesize events merely because the file was
+opened. The storage layer may still truncate an incomplete final JSONL
+fragment left by a torn write.
+
+If replay finds an open prompt whose latest model output has missing results,
+the coordinator schedules query continuation ahead of queued user input. At
+the start of that continuation, the query yields one `CommitToolResult` with
+status `interrupted` for each absent call in provider order. Recorded results
+remain untouched. Only after every missing result is durable does normal
+context preparation run.
+
+This boundary is deliberate: a tool side effect might have happened before a
+crash even though its result did not reach the WAL. Re-executing it is unsafe,
+while mutating the log merely by opening it makes inspection and validation
+surprising. Continuation preparation is the first point that both needs a
+provider-valid exchange and has explicit authority to write.
+
+## UI projection and responsiveness
+
+Input submission only enqueues and publishes queue state. The single consumer
+dequeues in FIFO order, appends `input.accepted`, then handles a command or
+query. Every durable append is followed by a fresh immutable `SessionView`.
+Provider deltas and running-tool state remain UI-owned ephemeral values.
+
+The UI projector always renders raw transcript content, including exchanges
+excluded from model context. The model projector applies representations and
+exchange visibility. Thus UI display and provider context share one source of
+truth while retaining consumer-specific filtering.

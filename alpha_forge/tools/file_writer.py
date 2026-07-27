@@ -173,9 +173,8 @@ def write_file(arguments: Mapping[str, Any]) -> str:
 FILE_WRITER_TOOL = Tool(
     name="file_writer",
     aliases=("write_file",),
-    is_mcp=False,
-    description="Creates or updates a UTF-8 text file.",
-    prompt=(
+    display_description="Creates or updates a UTF-8 text file.",
+    description=(
         "Write a UTF-8 text file. Choose one operation: write creates or "
         "overwrites the whole file; create fails if the file exists; append "
         "adds content; replace changes exact old_text only when the number of "
@@ -219,7 +218,7 @@ FILE_WRITER_TOOL = Tool(
         "required": ["path", "operation", "content"],
         "additionalProperties": False,
     },
-    function=write_file,
+    handler=write_file,
 )
 
 

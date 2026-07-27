@@ -1,13 +1,14 @@
-"""Core tool definition and execution errors."""
+"""Provider-neutral tool definitions and execution errors."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-ToolFunction = Callable[[Mapping[str, Any]], str]
-InputValidator = Callable[[Mapping[str, Any]], None]
+from alpha_forge.json_values import FrozenJsonObject
+
+ToolHandler = Callable[[Mapping[str, Any]], str]
 
 
 class ToolError(Exception):
@@ -22,32 +23,79 @@ class ToolExecutionError(ToolError):
     """Raised when a tool cannot complete a call."""
 
 
-@dataclass(frozen=True)
-class Tool:
-    """Application-facing definition for a callable model tool.
-
-    ``description`` is intended for people inspecting the registry, while
-    ``prompt`` is sent to the model as the OpenAI function description.
-    ``is_mcp`` and ``validate_input`` are extension points retained for future
-    MCP dispatch and custom input validation.
-    """
+@dataclass(frozen=True, slots=True, init=False)
+class ToolSpec:
+    """Provider-neutral metadata exposed to a model."""
 
     name: str
-    function: ToolFunction
     description: str
-    prompt: str
-    input_schema: Mapping[str, Any]
-    aliases: tuple[str, ...] = field(default_factory=tuple)
-    is_mcp: bool = False
-    validate_input: InputValidator | None = None
+    input_schema: FrozenJsonObject
 
-    def to_openai(self) -> dict[str, Any]:
-        """Return this tool in Chat Completions function-tool format."""
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.prompt,
-                "parameters": dict(self.input_schema),
-            },
-        }
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        input_schema: Mapping[str, Any],
+    ) -> None:
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "description", description)
+        object.__setattr__(
+            self,
+            "input_schema",
+            FrozenJsonObject(input_schema),
+        )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class Tool:
+    """A provider-neutral specification paired with its application handler."""
+
+    spec: ToolSpec
+    handler: ToolHandler
+    display_description: str
+    aliases: tuple[str, ...]
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        handler: ToolHandler,
+        description: str,
+        input_schema: Mapping[str, Any],
+        aliases: tuple[str, ...] = (),
+        display_description: str | None = None,
+    ) -> None:
+        object.__setattr__(
+            self,
+            "spec",
+            ToolSpec(name, description, input_schema),
+        )
+        object.__setattr__(self, "handler", handler)
+        object.__setattr__(
+            self,
+            "display_description",
+            display_description or description,
+        )
+        object.__setattr__(self, "aliases", tuple(aliases))
+
+    @property
+    def name(self) -> str:
+        return self.spec.name
+
+    @property
+    def description(self) -> str:
+        return self.spec.description
+
+    @property
+    def input_schema(self) -> Mapping[str, Any]:
+        return self.spec.input_schema
+
+
+__all__ = [
+    "Tool",
+    "ToolError",
+    "ToolExecutionError",
+    "ToolHandler",
+    "ToolNotFoundError",
+    "ToolSpec",
+]

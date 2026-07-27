@@ -9,17 +9,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from alpha_forge.model_messages import ToolCall
-from alpha_forge.models import RawToolResult
-from alpha_forge.prompt_editor import ToolResultPromptEditor
-from alpha_forge.session import Session
-from alpha_forge.streaming import ModelResponse
-from alpha_forge.tool_execution import ToolExecutor
+from alpha_forge.context import ContextPipeline, ToolResultBudgetPolicy
+from alpha_forge.providers import ProviderOutput, ToolCall
+from alpha_forge.sessions import Session
 from alpha_forge.tools import (
     DEFAULT_BASH_TIMEOUT_SECONDS,
     MAX_BASH_TIMEOUT_SECONDS,
     MIN_BASH_TIMEOUT_SECONDS,
     ToolExecutionError,
+    ToolExecutor,
     load_builtin_tools,
     run_bash,
 )
@@ -139,7 +137,7 @@ class BashToolTests(unittest.TestCase):
             )
         )
 
-        self.assertTrue(executed.failed)
+        self.assertEqual(executed.status, "error")
         self.assertTrue(executed.content.startswith("error: [alpha-forge bash]"))
         self.assertIn("exit_code: 7", executed.content)
         self.assertIn("--- stdout ---\noutput", executed.content)
@@ -203,47 +201,37 @@ class BashToolTests(unittest.TestCase):
             {"cmd": "printf 'x%.0s' {1..20000}"},
         )
         stdout_offset = result.index("--- stdout ---\n") + len("--- stdout ---\n")
-        session = Session()
-        turn_id = session.submit_user("run")
-        output = session.add_assistant_message(
-            turn_id=turn_id,
-            response=ModelResponse(
-                None,
-                (ToolCall("call-bash", "bash", "{}"),),
-            ),
+        session = Session.create(in_memory=True)
+        prompt = session.accept_prompt("run")
+        output = session.record_model_output(
+            prompt.event_id,
+            ProviderOutput((ToolCall("call-bash", "bash", "{}"),)),
         )
-        raw = session.add_tool_result(
-            output_id=output.output_id,
+        raw = session.record_tool_result(
+            model_output_event_id=output.event_id,
             call_id="call-bash",
+            status="success",
             content=result,
-            failed=False,
         )
-        editor = ToolResultPromptEditor(
-            individual_limit=500,
-            aggregate_limit=800,
-        )
-        session.add_prompt_edit(
-            output_id=output.output_id,
-            edit=editor.edit_results(
+        session.prepare_context(
+            ContextPipeline(
                 (
-                    RawToolResult(
-                        raw.result_id,
-                        raw.call_id,
-                        raw.content,
-                        raw.failed,
+                    ToolResultBudgetPolicy(
+                        individual_limit=500,
+                        aggregate_limit=800,
                     ),
                 )
-            ),
+            )
         )
 
         read_result = session.read_tool_result(
-            raw.result_id,
+            raw.event_id,
             offset=stdout_offset,
             limit=25,
         )
 
         self.assertTrue(read_result.startswith("x" * 25))
-        self.assertEqual(session.transcript.result(raw.result_id).content, result)
+        self.assertEqual(session.transcript.result(raw.event_id)[1].content, result)
 
     def test_rejects_invalid_arguments_and_missing_bash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

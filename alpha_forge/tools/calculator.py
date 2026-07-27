@@ -85,9 +85,8 @@ def calculate(arguments: Mapping[str, Any]) -> str:
 CALCULATOR_TOOL = Tool(
     name="calculator",
     aliases=("calc",),
-    is_mcp=False,
-    description="Safely evaluates a basic arithmetic expression.",
-    prompt=(
+    display_description="Safely evaluates a basic arithmetic expression.",
+    description=(
         "Evaluate a basic arithmetic expression. Use this tool when exact "
         "arithmetic is needed instead of calculating mentally."
     ),
@@ -102,5 +101,5 @@ CALCULATOR_TOOL = Tool(
         "required": ["expression"],
         "additionalProperties": False,
     },
-    function=calculate,
+    handler=calculate,
 )

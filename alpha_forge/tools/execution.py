@@ -1,33 +1,30 @@
-"""Session-agnostic execution of complete model tool calls."""
+"""Session-agnostic execution of complete tool calls."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
-from alpha_forge.models import ToolCall
-from alpha_forge.tools import ToolError, ToolRegistry
+from alpha_forge.providers.base import ToolCall
+from alpha_forge.tools.base import ToolError
+from alpha_forge.tools.registry import ToolRegistry
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutedToolResult:
-    """Raw result returned by the application-side execution boundary."""
-
     call_id: str
     content: str
-    failed: bool = False
+    status: Literal["success", "error"] = "success"
 
 
 class ToolCallExecutor(Protocol):
     async def execute(self, call: ToolCall) -> ExecutedToolResult:
-        """Execute one complete call without editing or persistence."""
+        """Execute one complete call without persistence or context editing."""
 
 
 class ToolExecutor:
-    """Run synchronous registry tools without blocking the event loop."""
-
     def __init__(self, registry: ToolRegistry) -> None:
         self.registry = registry
 
@@ -40,9 +37,13 @@ class ToolExecutor:
             if not isinstance(arguments, dict):
                 raise ValueError("arguments must decode to a JSON object")
             content = self.registry.execute(call.name, arguments)
-            return ExecutedToolResult(call.id, content)
+            return ExecutedToolResult(call.call_id, content)
         except (json.JSONDecodeError, ValueError, ToolError) as exc:
-            return ExecutedToolResult(call.id, f"error: {exc}", failed=True)
+            return ExecutedToolResult(
+                call.call_id,
+                f"error: {exc}",
+                "error",
+            )
 
 
 __all__ = ["ExecutedToolResult", "ToolCallExecutor", "ToolExecutor"]

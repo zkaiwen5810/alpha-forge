@@ -185,9 +185,8 @@ def run_bash(arguments: Mapping[str, Any]) -> str:
 BASH_TOOL = Tool(
     name="bash",
     aliases=("shell",),
-    is_mcp=False,
-    description="Runs a non-interactive Bash command.",
-    prompt=(
+    display_description="Runs a non-interactive Bash command.",
+    description=(
         "Run a command through non-interactive Bash with pipes, redirects, "
         "and command chaining available. Use cwd to select a working "
         "directory and timeout for bounded long-running commands. Each call "
@@ -219,7 +218,7 @@ BASH_TOOL = Tool(
         "required": ["cmd"],
         "additionalProperties": False,
     },
-    function=run_bash,
+    handler=run_bash,
 )
 
 

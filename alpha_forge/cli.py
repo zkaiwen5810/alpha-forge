@@ -13,8 +13,8 @@ from alpha_forge.config import (
     build_config,
     default_user_config_path,
 )
-from alpha_forge.repl_controller import ChatReplController
-from alpha_forge.session import DEFAULT_SYSTEM_PROMPT
+from alpha_forge.application.coordinator import ApplicationCoordinator
+from alpha_forge.sessions import DEFAULT_SYSTEM_PROMPT
 from alpha_forge.terminal_ui import TerminalChatUi
 
 
@@ -53,7 +53,7 @@ async def run_repl_async(
     config: Config, *, system_prompt: str = DEFAULT_SYSTEM_PROMPT
 ) -> int:
     """Run the full-screen prompt-toolkit chat UI."""
-    controller = ChatReplController(config, system_prompt=system_prompt)
+    controller = ApplicationCoordinator(config, system_prompt=system_prompt)
     ui = TerminalChatUi(controller)
     consumer_task = asyncio.create_task(controller.consume())
     try:

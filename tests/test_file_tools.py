@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from alpha_forge.prompt_editor import MAX_TOOL_RESULT_CHARS
+from alpha_forge.context import MAX_TOOL_RESULT_CHARS
 from alpha_forge.tools import (
     MAX_FILE_READ_CHARS,
     ToolExecutionError,
@@ -25,10 +25,7 @@ class FileReaderTests(unittest.TestCase):
         self.assertEqual(self.registry.get("file_writer").name, "file_writer")
         self.assertEqual(self.registry.get("write_file").name, "file_writer")
         self.assertEqual(
-            [
-                definition["function"]["name"]
-                for definition in self.registry.definitions()
-            ],
+            [spec.name for spec in self.registry.specs()],
             ["calculator", "file_reader", "file_writer", "bash"],
         )
 
