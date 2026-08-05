@@ -50,20 +50,31 @@ def tool_calls(output: ModelOutput) -> tuple[ToolCall, ...]:
 class TranscriptState:
     """Small replay index containing references, not projected message copies."""
 
+    # The unique opening event that supplies session identity and instructions.
     session: SessionOpened | None = None
+    # Every record ID seen so far; its size is also the current revision.
     event_ids: set[str] = field(default_factory=set)
+    # Accepted prompt and command events keyed by their event IDs.
     inputs: dict[str, InputAccepted] = field(default_factory=dict)
+    # Command input IDs that already have a terminal completion event.
     command_completions: set[str] = field(default_factory=set)
+    # Model outputs keyed by their event IDs and ordered across the transcript.
     outputs: dict[str, ModelOutput] = field(default_factory=dict)
     output_order: list[str] = field(default_factory=list)
+    # Each prompt input ID maps to its model outputs in provider-request order.
     outputs_by_prompt: dict[str, list[str]] = field(default_factory=dict)
+    # Tool results keyed by result event ID, plus call lookup per model output.
     results: dict[str, ToolResult] = field(default_factory=dict)
     results_by_output: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Context-only rendering selected for each tool-result event.
     result_representations: dict[str, ToolResultRepresentation] = field(
         default_factory=dict
     )
+    # Context visibility keyed by the model output that opened a tool exchange.
     exchange_visibility: dict[str, bool] = field(default_factory=dict)
+    # The unresolved prompt at the transcript tail, if a query is in progress.
     active_prompt_event_id: str | None = None
+    # Prompt IDs whose queries ended with query.failed.
     failed_prompts: set[str] = field(default_factory=set)
 
     @property
