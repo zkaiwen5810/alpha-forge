@@ -8,7 +8,6 @@ from typing import Any
 from openai import AsyncOpenAI, OpenAI
 
 from alpha_forge.config import Config
-from alpha_forge.json_values import thaw_json
 from alpha_forge.context.models import (
     ModelContextSnapshot,
     ModelOutputContext,
@@ -16,6 +15,7 @@ from alpha_forge.context.models import (
     ToolResultContext,
     UserMessage,
 )
+from alpha_forge.json_values import thaw_json
 from alpha_forge.providers.base import (
     OutputMessage,
     OutputRefusal,
@@ -217,9 +217,13 @@ def _token_usage(usage: object) -> TokenUsage | None:
     if output_tokens is None:
         output_tokens = _field(usage, "output_tokens")
     total_tokens = _field(usage, "total_tokens")
-    if total_tokens is None and isinstance(input_tokens, int) and isinstance(
-        output_tokens,
-        int,
+    if (
+        total_tokens is None
+        and isinstance(input_tokens, int)
+        and isinstance(
+            output_tokens,
+            int,
+        )
     ):
         total_tokens = input_tokens + output_tokens
 

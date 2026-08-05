@@ -10,7 +10,7 @@ from alpha_forge.transcript.validation import tool_calls
 
 
 @dataclass(frozen=True, slots=True)
-class PendingToolBatch:
+class PendingIntermediateRound:
     model_output_event_id: str
     missing_calls: tuple[ToolCall, ...]
 
@@ -18,8 +18,8 @@ class PendingToolBatch:
 @dataclass(frozen=True, slots=True)
 class OpenQuery:
     prompt_event_id: str
-    pending_tool_batch: PendingToolBatch | None
-    completed_tool_rounds: int
+    pending_intermediate_round: PendingIntermediateRound | None
+    completed_intermediate_rounds: int
 
 
 class SessionStateProjector:
@@ -45,7 +45,7 @@ class SessionStateProjector:
         )
         return OpenQuery(
             prompt_id,
-            PendingToolBatch(
+            PendingIntermediateRound(
                 output_id,
                 missing,
             ),
@@ -59,4 +59,4 @@ class SessionStateProjector:
         )
 
 
-__all__ = ["OpenQuery", "PendingToolBatch", "SessionStateProjector"]
+__all__ = ["OpenQuery", "PendingIntermediateRound", "SessionStateProjector"]

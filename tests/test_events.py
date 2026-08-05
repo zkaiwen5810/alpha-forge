@@ -1,7 +1,11 @@
 import unittest
 from dataclasses import dataclass
 
+from alpha_forge.application.events import (
+    ProviderRequestStarted as ApplicationProviderRequestStarted,
+)
 from alpha_forge.events import Event, EventRouter
+from alpha_forge.query import ProviderRequestStarted
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +19,10 @@ class Second(Event):
 
 
 class EventRouterTests(unittest.TestCase):
+    def test_provider_progress_event_is_shared_across_boundaries(self) -> None:
+        self.assertIs(ApplicationProviderRequestStarted, ProviderRequestStarted)
+        self.assertIsInstance(ProviderRequestStarted("prompt", "request"), Event)
+
     def test_selective_delivery_preserves_registration_order(self) -> None:
         router = EventRouter()
         received: list[str] = []

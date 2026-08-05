@@ -22,12 +22,6 @@ from alpha_forge.application.events import (
     ToolStarted,
 )
 from alpha_forge.events import Event
-from alpha_forge.providers.base import (
-    ProviderOutput,
-    ProviderOutputAccumulator,
-    TokenUsage,
-    ToolCall,
-)
 from alpha_forge.projectors.ui_history import (
     UiCommandMessage,
     UiHistoryItem,
@@ -36,6 +30,12 @@ from alpha_forge.projectors.ui_history import (
     UiQueryFailure,
     UiSessionLink,
     UiToolResult,
+)
+from alpha_forge.providers.base import (
+    ProviderOutput,
+    ProviderOutputAccumulator,
+    TokenUsage,
+    ToolCall,
 )
 
 HistoryRole = Literal[
@@ -118,9 +118,7 @@ class ChatUiState:
         self.status = "Ready"
         self.exiting = False
         self.persistence_error: str | None = None
-        self.tool_result_preview = (
-            tool_result_preview or TailLinesUiToolResultPreview()
-        )
+        self.tool_result_preview = tool_result_preview or TailLinesUiToolResultPreview()
         self._queued_inputs: dict[str, str] = {}
         self._cache_revision: int | None = None
         self._transcript_cache: tuple[HistoryLine, ...] = ()
@@ -269,8 +267,7 @@ class ChatUiState:
                     self._render_model_output(
                         item,
                         results_by_output.get(item.output_event_id, {}),
-                        show_usage=item.output_event_id
-                        == usage_output_event_id,
+                        show_usage=item.output_event_id == usage_output_event_id,
                     )
                 )
             elif isinstance(item, UiToolResult):
@@ -311,8 +308,7 @@ class ChatUiState:
             elif isinstance(item, UiQueryFailure):
                 completion = (item.sequence, None)
             if completion is not None and (
-                latest_completion is None
-                or completion[0] > latest_completion[0]
+                latest_completion is None or completion[0] > latest_completion[0]
             ):
                 latest_completion = completion
         return None if latest_completion is None else latest_completion[1]
@@ -361,9 +357,7 @@ class ChatUiState:
                 )
             )
         if show_usage and output.usage:
-            lines.append(
-                HistoryLine("token_usage", self._format_usage(output.usage))
-            )
+            lines.append(HistoryLine("token_usage", self._format_usage(output.usage)))
         return lines
 
     def _render_tool_result(
@@ -425,17 +419,9 @@ class ChatUiState:
             if preview.text:
                 lines.extend(
                     self._labeled_lines(
-                        (
-                            "  Assistant note: "
-                            if preview.tool_calls
-                            else "Assistant: "
-                        ),
+                        ("  Assistant note: " if preview.tool_calls else "Assistant: "),
                         preview.text,
-                        (
-                            "assistant_note"
-                            if preview.tool_calls
-                            else "assistant"
-                        ),
+                        ("assistant_note" if preview.tool_calls else "assistant"),
                     )
                 )
             if preview.refusal:

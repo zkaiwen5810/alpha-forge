@@ -5,8 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from alpha_forge.events import Event
-from alpha_forge.providers.base import ProviderDelta, ProviderOutput, ToolCall
 from alpha_forge.projectors.ui_history import UiHistoryItem
+from alpha_forge.providers.base import ToolCall
+from alpha_forge.query.protocol import (
+    ProviderDeltaReceived,
+    ProviderRequestStarted,
+    ProviderResponseCompleted,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,24 +40,6 @@ class InputQueued(ApplicationEvent):
 @dataclass(frozen=True, slots=True)
 class InputStarted(ApplicationEvent):
     item_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderRequestStarted(ApplicationEvent):
-    prompt_event_id: str
-    request_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderDeltaReceived(ApplicationEvent):
-    request_id: str
-    delta: ProviderDelta
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderResponseCompleted(ApplicationEvent):
-    request_id: str
-    output: ProviderOutput
 
 
 @dataclass(frozen=True, slots=True)

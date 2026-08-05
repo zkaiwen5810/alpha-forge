@@ -458,7 +458,7 @@ class TranscriptState:
         if event.stage not in (
             "context",
             "provider",
-            "tool_round_limit",
+            "intermediate_round_limit",
             "internal",
         ):
             self._fail(f"invalid query failure stage: {event.stage}")

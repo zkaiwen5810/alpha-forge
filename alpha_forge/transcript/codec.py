@@ -218,7 +218,7 @@ def _decode_event(event_type: str, payload: dict[str, Any]) -> TranscriptEvent:
         if stage not in (
             "context",
             "provider",
-            "tool_round_limit",
+            "intermediate_round_limit",
             "internal",
         ):
             raise ValueError(f"invalid query failure stage: {stage}")

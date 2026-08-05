@@ -25,7 +25,7 @@ from alpha_forge.query.protocol import (
     ToolResultCommitted,
 )
 
-MAX_TOOL_ROUNDS = 10
+MAX_INTERMEDIATE_ROUNDS = 10
 INTERRUPTED_TOOL_RESULT = (
     "Tool execution was interrupted before a durable result was recorded."
 )
@@ -38,20 +38,20 @@ class QueryEngine:
         self,
         provider: ModelProvider,
         *,
-        max_tool_rounds: int = MAX_TOOL_ROUNDS,
+        max_intermediate_rounds: int = MAX_INTERMEDIATE_ROUNDS,
     ) -> None:
-        if max_tool_rounds <= 0:
-            raise ValueError("max_tool_rounds must be positive")
+        if max_intermediate_rounds <= 0:
+            raise ValueError("max_intermediate_rounds must be positive")
         self.provider = provider
-        self.max_tool_rounds = max_tool_rounds
+        self.max_intermediate_rounds = max_intermediate_rounds
 
     async def run(
         self,
         request: QueryRequest,
     ) -> AsyncGenerator[QueryStreamEvent, QueryFeedback | None]:
-        tool_rounds = request.completed_tool_rounds
+        intermediate_rounds = request.completed_intermediate_rounds
 
-        pending = request.pending_tool_continuation
+        pending = request.pending_intermediate_round
         if pending is not None:
             recovery_revision = 0
             for call in pending.missing_calls:
@@ -75,13 +75,14 @@ class QueryEngine:
                         "recovery commit feedback is not monotonic",
                     )
                 recovery_revision = committed_result.revision
-            tool_rounds += 1
+            intermediate_rounds += 1
 
         while True:
-            if tool_rounds >= self.max_tool_rounds:
+            if intermediate_rounds >= self.max_intermediate_rounds:
                 raise QueryExecutionError(
-                    "tool_round_limit",
-                    f"tool round limit reached ({self.max_tool_rounds})",
+                    "intermediate_round_limit",
+                    "intermediate round limit reached "
+                    f"({self.max_intermediate_rounds})",
                 )
 
             feedback = yield PrepareContext(request.prompt_event_id)
@@ -182,7 +183,7 @@ class QueryEngine:
                         "tool-result commit feedback has an unexpected revision",
                     )
                 committed_revision = committed_result.revision
-            tool_rounds += 1
+            intermediate_rounds += 1
 
 
 def _expect[FeedbackType: QueryFeedback](
@@ -201,6 +202,6 @@ def _expect[FeedbackType: QueryFeedback](
 
 __all__ = [
     "INTERRUPTED_TOOL_RESULT",
-    "MAX_TOOL_ROUNDS",
+    "MAX_INTERMEDIATE_ROUNDS",
     "QueryEngine",
 ]

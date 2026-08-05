@@ -143,7 +143,10 @@ class QueryFlowTests(unittest.TestCase):
         continuation = session.open_query()
         self.assertEqual(session.revision, revision_before_open)
         self.assertEqual(
-            [call.call_id for call in continuation.pending_tool_batch.missing_calls],
+            [
+                call.call_id
+                for call in continuation.pending_intermediate_round.missing_calls
+            ],
             ["missing"],
         )
 
@@ -245,7 +248,7 @@ class QueryFlowTests(unittest.TestCase):
             ],
         )
 
-    def test_tool_round_limit_fails_only_after_the_exchange_is_complete(self) -> None:
+    def test_intermediate_round_limit_fails_after_complete_exchange(self) -> None:
         provider = ScriptedProvider(
             [ProviderOutput((ToolCall("call", "echo", '{"value":"x"}'),))]
         )
@@ -265,13 +268,16 @@ class QueryFlowTests(unittest.TestCase):
             provider=provider,
             session=session,
             tool_registry=registry,
-            query=QueryEngine(provider, max_tool_rounds=1),
+            query=QueryEngine(provider, max_intermediate_rounds=1),
         )
 
         asyncio.run(_consume_one(coordinator, "loop"))
 
         self.assertIsInstance(session.transcript.events[-1], QueryFailed)
-        self.assertEqual(session.transcript.events[-1].stage, "tool_round_limit")
+        self.assertEqual(
+            session.transcript.events[-1].stage,
+            "intermediate_round_limit",
+        )
         result = next(
             event
             for event in session.transcript.events

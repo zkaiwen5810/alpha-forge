@@ -48,12 +48,19 @@ are audit metadata only; protocol order and context visibility never depend on
 wall-clock time. This is a completely new schema: records with any schema
 version other than 1 are rejected and no legacy migration is attempted.
 
-The writer validates a candidate against replay state, writes one compact line,
-flushes it with `fsync`, and only then exposes the new revision to in-process
-readers. It holds an exclusive file lock. A stale expected revision, invalid
-protocol transition, or write failure cannot publish a partial in-memory
-state. An incomplete final JSONL fragment can be removed during resume; a
-malformed completed line makes the transcript corrupt.
+A new session starts as provisional in-memory state: `session.opened` and a
+possible `/clear` link are buffered without creating a file. When the session
+accepts its first prompt or slash command, the writer creates and locks the
+file, writes the buffered records together with `input.accepted`, and flushes
+them with `fsync`. Closing a provisional session leaves no transcript file.
+
+After that first input, the writer validates each candidate against replay
+state, writes one compact line, flushes it with `fsync`, and only then exposes
+the new revision to in-process readers. It holds an exclusive file lock. A
+stale expected revision, invalid protocol transition, or write failure cannot
+publish a partial in-memory state. An incomplete final JSONL fragment can be
+removed during resume; a malformed completed line makes the transcript
+corrupt.
 
 ## Durable event catalog
 

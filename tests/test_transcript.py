@@ -44,7 +44,9 @@ class TranscriptSchemaTests(unittest.TestCase):
                 transcript_path=path,
                 session_id="session-one",
             )
+            self.assertFalse(path.exists())
             prompt = session.accept_prompt("hello")
+            self.assertTrue(path.exists())
             session.record_model_output(prompt.event_id, _answer("hi"))
             session.close()
 
@@ -62,6 +64,29 @@ class TranscriptSchemaTests(unittest.TestCase):
         serialized = json.dumps(records)
         self.assertNotIn("turn_id", serialized)
         self.assertNotIn("parent_event_id", serialized)
+
+    def test_new_session_persists_when_first_command_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            session = Session.create(transcript_path=path)
+
+            self.assertFalse(path.exists())
+            session.accept_command(
+                text="/help",
+                name="/help",
+                arguments="",
+            )
+            self.assertTrue(path.exists())
+            session.close()
+
+            records = [
+                json.loads(line) for line in path.read_text().splitlines()
+            ]
+
+        self.assertEqual(
+            [record["type"] for record in records],
+            ["session.opened", "input.accepted"],
+        )
 
     def test_resume_replays_and_validates_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -139,8 +164,7 @@ class TranscriptSchemaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "session.jsonl"
             store = TranscriptStore.create(instructions=None, path=path)
-            with self.assertRaises(TranscriptPersistenceError):
-                TranscriptStore.resume(path)
+            self.assertFalse(path.exists())
             with self.assertRaisesRegex(
                 TranscriptPersistenceError,
                 "stale transcript revision",
@@ -149,6 +173,12 @@ class TranscriptSchemaTests(unittest.TestCase):
                     InputAccepted("prompt", "hello"),
                     expected_revision=0,
                 )
+            store.append(
+                InputAccepted("prompt", "hello"),
+                expected_revision=1,
+            )
+            with self.assertRaises(TranscriptPersistenceError):
+                TranscriptStore.resume(path)
             store.close()
 
     def test_replay_indexes_are_exposed_as_read_snapshots(self) -> None:
@@ -165,12 +195,16 @@ class TranscriptSchemaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "session.jsonl"
             store = TranscriptStore.create(instructions=None, path=path)
+            store.append(
+                InputAccepted("prompt", "hello"),
+                expected_revision=1,
+            )
             store.close()
             with path.open("ab") as stream:
                 stream.write(b'{"schema_version":1')
 
             resumed = TranscriptStore.resume(path)
-            self.assertEqual(resumed.revision, 1)
+            self.assertEqual(resumed.revision, 2)
             resumed.close()
             self.assertTrue(path.read_bytes().endswith(b"\n"))
 

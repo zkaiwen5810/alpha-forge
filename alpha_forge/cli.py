@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import sys
 
+from alpha_forge.application.coordinator import ApplicationCoordinator
 from alpha_forge.config import (
     Config,
     ConfigError,
@@ -13,7 +14,6 @@ from alpha_forge.config import (
     build_config,
     default_user_config_path,
 )
-from alpha_forge.application.coordinator import ApplicationCoordinator
 from alpha_forge.sessions import DEFAULT_SYSTEM_PROMPT
 from alpha_forge.terminal_ui import TerminalChatUi
 

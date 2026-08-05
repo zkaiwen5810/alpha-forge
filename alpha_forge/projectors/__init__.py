@@ -3,7 +3,7 @@
 from alpha_forge.projectors.model_context import ModelContextProjector
 from alpha_forge.projectors.session_state import (
     OpenQuery,
-    PendingToolBatch,
+    PendingIntermediateRound,
     SessionStateProjector,
 )
 from alpha_forge.projectors.ui_history import (
@@ -20,7 +20,7 @@ from alpha_forge.projectors.ui_history import (
 __all__ = [
     "ModelContextProjector",
     "OpenQuery",
-    "PendingToolBatch",
+    "PendingIntermediateRound",
     "SessionStateProjector",
     "UiCommandMessage",
     "UiHistoryItem",

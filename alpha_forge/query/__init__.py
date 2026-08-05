@@ -2,16 +2,16 @@
 
 from alpha_forge.query.engine import (
     INTERRUPTED_TOOL_RESULT,
-    MAX_TOOL_ROUNDS,
+    MAX_INTERMEDIATE_ROUNDS,
     QueryEngine,
 )
 from alpha_forge.query.protocol import (
-    CommittedToolResultStatus,
     CommitModelOutput,
+    CommittedToolResultStatus,
     CommitToolResult,
     ContextPrepared,
     ModelOutputCommitted,
-    PendingToolContinuation,
+    PendingIntermediateRound,
     PrepareContext,
     ProviderDeltaReceived,
     ProviderRequestStarted,
@@ -34,9 +34,9 @@ __all__ = [
     "CommitToolResult",
     "ContextPrepared",
     "INTERRUPTED_TOOL_RESULT",
-    "MAX_TOOL_ROUNDS",
+    "MAX_INTERMEDIATE_ROUNDS",
     "ModelOutputCommitted",
-    "PendingToolContinuation",
+    "PendingIntermediateRound",
     "PrepareContext",
     "ProviderDeltaReceived",
     "ProviderRequestStarted",

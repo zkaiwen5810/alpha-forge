@@ -1,7 +1,9 @@
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from alpha_forge.application import ApplicationCoordinator
 from alpha_forge.config import Config
@@ -41,6 +43,26 @@ class EchoProvider:
 
 
 class SessionAndCoordinatorTests(unittest.TestCase):
+    def test_clear_destination_is_not_persisted_until_it_accepts_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"XDG_DATA_HOME": tmp}):
+                source = Session.create()
+                coordinator = ApplicationCoordinator(
+                    Config("key"),
+                    provider=EchoProvider(),
+                    session=source,
+                )
+
+                async def run():
+                    coordinator.submit("/clear")
+                    coordinator.request_exit()
+                    await coordinator.consume()
+
+                asyncio.run(run())
+
+                self.assertTrue(source.transcript_path.exists())
+                self.assertFalse(coordinator.session.transcript_path.exists())
+
     def test_fifo_accepts_next_prompt_only_after_prior_query_completes(self) -> None:
         provider = EchoProvider()
         session = Session.create(in_memory=True)

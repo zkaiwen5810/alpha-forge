@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import ClassVar, Literal
 
-from alpha_forge.providers.base import ModelOutputItem, TokenUsage
 from alpha_forge.json_values import FrozenJsonObject
+from alpha_forge.providers.base import ModelOutputItem, TokenUsage
 
 CommandLevel = Literal["notice", "error"]
 CommandStatus = Literal["success", "error"]
@@ -17,7 +17,7 @@ ToolResultStatus = Literal["success", "error", "interrupted"]
 QueryFailureStage = Literal[
     "context",
     "provider",
-    "tool_round_limit",
+    "intermediate_round_limit",
     "internal",
 ]
 
@@ -144,9 +144,7 @@ class SetToolExchangeVisibility:
     )
 
 
-type ContextOperation = (
-    SetToolResultRepresentation | SetToolExchangeVisibility
-)
+type ContextOperation = SetToolResultRepresentation | SetToolExchangeVisibility
 
 
 @dataclass(frozen=True, slots=True)

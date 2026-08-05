@@ -137,7 +137,8 @@ The stateless `QueryEngine` uses an effect/feedback protocol. Before each
 provider request it asks the coordinator for a freshly projected committed
 context. Model outputs and individual tool results also require durable commit
 feedback before the loop can advance. The engine retains no session,
-transcript, or mutable completed-history copy and stops after 10 tool rounds.
+transcript, or mutable completed-history copy and stops after 10 intermediate
+rounds before a final response.
 
 The default serial context policy bounds one projected tool result to 16,000
 Unicode characters and the latest tool exchange to 32,000 characters in
@@ -152,9 +153,12 @@ $XDG_DATA_HOME/alpha-forge/transcripts/<session-id>.jsonl
 ```
 
 When `XDG_DATA_HOME` is unset, the base directory is
-`~/.local/share/alpha-forge`. Each compact JSONL record is appended, flushed,
-and synced before it becomes visible as completed history. New transcript
-directories and files use modes `0700` and `0600`.
+`~/.local/share/alpha-forge`. A new transcript file is deferred until the
+session accepts its first prompt or slash command; closing an unused session
+leaves no file. At first input, the opening records and accepted input are
+written together. Later records are appended, flushed, and synced before they
+become visible as completed history. New transcript directories and files use
+modes `0700` and `0600`.
 
 `/resume PATH` validates and opens a transcript without changing it. If the
 latest provider output has missing tool results, resumed query continuation

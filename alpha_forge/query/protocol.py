@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from alpha_forge.context.models import ModelContextSnapshot
+from alpha_forge.events import Event
 from alpha_forge.providers.base import (
     ProviderDelta,
     ProviderOutput,
@@ -18,7 +19,7 @@ type CommittedToolResultStatus = Literal["success", "error", "interrupted"]
 
 
 @dataclass(frozen=True, slots=True)
-class PendingToolContinuation:
+class PendingIntermediateRound:
     model_output_event_id: str
     missing_calls: tuple[ToolCall, ...]
 
@@ -28,13 +29,13 @@ class QueryRequest:
     """Everything needed to continue one already-accepted prompt."""
 
     prompt_event_id: str
-    pending_tool_continuation: PendingToolContinuation | None
-    completed_tool_rounds: int
+    pending_intermediate_round: PendingIntermediateRound | None
+    completed_intermediate_rounds: int
     tool_specs: tuple[ToolSpec, ...]
     tool_executor: ToolCallExecutor
 
 
-class QueryEvent:
+class QueryEvent(Event):
     """Base for effects and ephemeral progress emitted by the query engine."""
 
 
@@ -126,7 +127,7 @@ type QueryStreamEvent = (
 type QueryFailureStage = Literal[
     "context",
     "provider",
-    "tool_round_limit",
+    "intermediate_round_limit",
     "internal",
 ]
 
@@ -135,7 +136,7 @@ class QueryExecutionError(RuntimeError):
     """A query failure classified for the durable ``query.failed`` event."""
 
     def __init__(self, stage: QueryFailureStage, message: str) -> None:
-        self.stage = stage
+        self.stage: QueryFailureStage = stage
         super().__init__(message)
 
 
@@ -145,7 +146,7 @@ __all__ = [
     "CommitToolResult",
     "ContextPrepared",
     "ModelOutputCommitted",
-    "PendingToolContinuation",
+    "PendingIntermediateRound",
     "PrepareContext",
     "ProviderDeltaReceived",
     "ProviderRequestStarted",

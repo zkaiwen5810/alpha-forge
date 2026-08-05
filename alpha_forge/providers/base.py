@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Literal, Protocol
 
@@ -216,11 +216,13 @@ class ModelProvider(Protocol):
         context: ModelContextSnapshot,
         *,
         tools: tuple[ToolSpec, ...],
-    ) -> AsyncIterator[ProviderStreamEvent]:
+    ) -> AsyncGenerator[ProviderStreamEvent]:
         """Stream one provider response for a projected context snapshot."""
+        ...
 
     def list_models(self) -> list[str]:
         """Return model IDs visible to the configured provider."""
+        ...
 
 
 __all__ = [

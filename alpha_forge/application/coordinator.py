@@ -16,9 +16,9 @@ from alpha_forge.application.events import (
     InputStarted,
     ModelOutputRecorded,
     PersistenceFailed,
-    ProviderDeltaReceived as ApplicationProviderDeltaReceived,
-    ProviderRequestStarted as ApplicationProviderRequestStarted,
-    ProviderResponseCompleted as ApplicationProviderResponseCompleted,
+    ProviderDeltaReceived,
+    ProviderRequestStarted,
+    ProviderResponseCompleted,
     RequestFailed,
     SessionView,
     SessionViewChanged,
@@ -38,11 +38,8 @@ from alpha_forge.query import (
     CommitToolResult,
     ContextPrepared,
     ModelOutputCommitted,
-    PendingToolContinuation,
+    PendingIntermediateRound,
     PrepareContext,
-    ProviderDeltaReceived,
-    ProviderRequestStarted,
-    ProviderResponseCompleted,
     QueryCompleted,
     QueryEffect,
     QueryEngine,
@@ -173,11 +170,9 @@ class ApplicationCoordinator:
                         self.events.publish(ExitReady())
                         return
                     if self._persistence_halted:
-                        if (
-                            isinstance(item, CommandInput)
-                            and item.raw.strip().split(maxsplit=1)[0]
-                            in ("/exit", "/quit")
-                        ):
+                        if isinstance(item, CommandInput) and item.raw.strip().split(
+                            maxsplit=1
+                        )[0] in ("/exit", "/quit"):
                             self.events.publish(ExitReady())
                             return
                         continue
@@ -218,15 +213,17 @@ class ApplicationCoordinator:
         registry = self._query_registry(self.session)
         request = QueryRequest(
             prompt_event_id=continuation.prompt_event_id,
-            pending_tool_continuation=(
-                PendingToolContinuation(
-                    continuation.pending_tool_batch.model_output_event_id,
-                    continuation.pending_tool_batch.missing_calls,
+            pending_intermediate_round=(
+                PendingIntermediateRound(
+                    continuation.pending_intermediate_round.model_output_event_id,
+                    continuation.pending_intermediate_round.missing_calls,
                 )
-                if continuation.pending_tool_batch is not None
+                if continuation.pending_intermediate_round is not None
                 else None
             ),
-            completed_tool_rounds=continuation.completed_tool_rounds,
+            completed_intermediate_rounds=(
+                continuation.completed_intermediate_rounds
+            ),
             tool_specs=registry.specs(),
             tool_executor=ToolExecutor(registry),
         )
@@ -304,27 +301,13 @@ class ApplicationCoordinator:
 
     def _publish_query_progress(self, event: object) -> None:
         if isinstance(event, ProviderRequestStarted):
-            self.events.publish(
-                ApplicationProviderRequestStarted(
-                    event.prompt_event_id,
-                    event.request_id,
-                )
-            )
+            self.events.publish(event)
         elif isinstance(event, ProviderDeltaReceived):
-            self.events.publish(
-                ApplicationProviderDeltaReceived(event.request_id, event.delta)
-            )
+            self.events.publish(event)
         elif isinstance(event, ProviderResponseCompleted):
-            self.events.publish(
-                ApplicationProviderResponseCompleted(
-                    event.request_id,
-                    event.output,
-                )
-            )
+            self.events.publish(event)
         elif isinstance(event, ToolExecutionStarted):
-            self.events.publish(
-                ToolStarted(event.model_output_event_id, event.call)
-            )
+            self.events.publish(ToolStarted(event.model_output_event_id, event.call))
         elif isinstance(event, QueryCompleted):
             self.events.publish(StatusChanged("Ready"))
 
@@ -362,9 +345,7 @@ class ApplicationCoordinator:
                 source,
                 command_record.event_id,
                 outcome,
-                resume_path=(
-                    parsed.arguments if outcome.action == "resume" else None
-                ),
+                resume_path=(parsed.arguments if outcome.action == "resume" else None),
             )
 
         try:
@@ -467,9 +448,7 @@ class ApplicationCoordinator:
     def _schedule_recovery(self, session: Session) -> None:
         continuation = session.open_query()
         if continuation is not None:
-            self._recovery.append(
-                RecoveryInput(uuid4().hex, continuation)
-            )
+            self._recovery.append(RecoveryInput(uuid4().hex, continuation))
 
     def _session_view(self) -> SessionView:
         return SessionView(
@@ -479,9 +458,7 @@ class ApplicationCoordinator:
         )
 
     def _publish_view(self, *, reset_active: bool = False) -> None:
-        self.events.publish(
-            SessionViewChanged(self._session_view(), reset_active)
-        )
+        self.events.publish(SessionViewChanged(self._session_view(), reset_active))
 
     @staticmethod
     def _parse_input(raw: str) -> UserInput:

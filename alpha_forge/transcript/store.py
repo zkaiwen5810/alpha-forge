@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-import fcntl
-
 from alpha_forge.transcript.codec import decode_record, encode_record
 from alpha_forge.transcript.events import (
+    InputAccepted,
     SessionOpened,
     ToolResult,
     TranscriptEvent,
@@ -36,11 +36,13 @@ class TranscriptStore:
         records: list[TranscriptRecord],
         state: TranscriptState,
         fd: int | None,
+        deferred_create: bool = False,
     ) -> None:
         self.path = path
         self._records = records
         self._state = state
         self._fd = fd
+        self._deferred_create = deferred_create
         self._poisoned = False
         self._closed = False
 
@@ -58,36 +60,17 @@ class TranscriptStore:
             if path is not None
             else default_transcript_directory() / f"{resolved_id}.jsonl"
         )
-        try:
-            resolved_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(resolved_path.parent, 0o700)
-            fd = os.open(
-                resolved_path,
-                os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-            _lock(fd, resolved_path)
-            _sync_directory(resolved_path.parent)
-        except (OSError, TranscriptPersistenceError) as exc:
-            if isinstance(exc, TranscriptPersistenceError):
-                raise
-            raise TranscriptPersistenceError(
-                f"cannot create transcript at {resolved_path}: {exc}"
-            ) from exc
         store = cls(
             path=resolved_path,
             records=[],
             state=TranscriptState(),
-            fd=fd,
+            fd=None,
+            deferred_create=True,
         )
-        try:
-            store.append(
-                SessionOpened(resolved_id, instructions),
-                expected_revision=0,
-            )
-        except Exception:
-            store.close()
-            raise
+        store.append(
+            SessionOpened(resolved_id, instructions),
+            expected_revision=0,
+        )
         return store
 
     @classmethod
@@ -190,41 +173,61 @@ class TranscriptStore:
         candidate_state = self._state.clone()
         candidate_state.apply(record)
 
-        try:
-            data = (
-                json.dumps(
-                    encode_record(record),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                + b"\n"
+        data = _serialize_record(record)
+
+        if self._deferred_create and isinstance(event, InputAccepted):
+            pending = b"".join(
+                _serialize_record(existing) for existing in self._records
             )
-        except (TypeError, ValueError, UnicodeError) as exc:
-            raise TranscriptCorruptError(
-                f"transcript event cannot be encoded: {exc}"
-            ) from exc
+            self._create_writer()
+            self._write(pending + data)
+            self._deferred_create = False
+        elif self._fd is not None:
+            self._write(data)
 
-        if self._fd is not None:
-            try:
-                view = memoryview(data)
-                while view:
-                    written = os.write(self._fd, view)
-                    if written <= 0:
-                        raise OSError("zero-byte transcript write")
-                    view = view[written:]
-                os.fsync(self._fd)
-            except OSError as exc:
-                self._poisoned = True
-                raise TranscriptPersistenceError(
-                    f"cannot append transcript at {self.path}: {exc}"
-                ) from exc
-
-        # The candidate was validated before the WAL write. It becomes visible
-        # to in-process readers only after the durable append succeeds.
+        # Materialized transcripts expose candidates only after their WAL
+        # write. A new transcript may expose provisional opening/link records
+        # in memory until its first accepted input flushes the complete prefix.
         self._state = candidate_state
         self._records.append(record)
         return record
+
+    def _create_writer(self) -> None:
+        assert self.path is not None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.path.parent, 0o700)
+            fd = os.open(
+                self.path,
+                os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            _lock(fd, self.path)
+            self._fd = fd
+            _sync_directory(self.path.parent)
+        except (OSError, TranscriptPersistenceError) as exc:
+            self._poisoned = True
+            if isinstance(exc, TranscriptPersistenceError):
+                raise
+            raise TranscriptPersistenceError(
+                f"cannot create transcript at {self.path}: {exc}"
+            ) from exc
+
+    def _write(self, data: bytes) -> None:
+        assert self._fd is not None
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(self._fd, view)
+                if written <= 0:
+                    raise OSError("zero-byte transcript write")
+                view = view[written:]
+            os.fsync(self._fd)
+        except OSError as exc:
+            self._poisoned = True
+            raise TranscriptPersistenceError(
+                f"cannot append transcript at {self.path}: {exc}"
+            ) from exc
 
     def result(self, result_event_id: str) -> tuple[TranscriptRecord, ToolResult]:
         for record in self._records:
@@ -251,6 +254,23 @@ class TranscriptStore:
 
     def __del__(self) -> None:
         self.close()
+
+
+def _serialize_record(record: TranscriptRecord) -> bytes:
+    try:
+        return (
+            json.dumps(
+                encode_record(record),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise TranscriptCorruptError(
+            f"transcript event cannot be encoded: {exc}"
+        ) from exc
 
 
 def _lock(fd: int, path: Path) -> None:
