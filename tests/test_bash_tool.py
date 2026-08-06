@@ -70,8 +70,7 @@ class BashToolTests(unittest.TestCase):
     def test_runs_pwd_in_selected_directory_and_supports_bash_pipelines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cwd = Path(tmp).resolve()
-            result = self.registry.execute(
-                "bash",
+            result = run_bash(
                 {
                     "cmd": (
                         "pwd; printf alpha | tr '[:lower:]' '[:upper:]'; "
@@ -89,7 +88,7 @@ class BashToolTests(unittest.TestCase):
         self.assertEqual(_section(result, "stderr"), "warning")
 
     def test_defaults_to_process_working_directory(self) -> None:
-        result = self.registry.execute("shell", {"cmd": "pwd"})
+        result = run_bash({"cmd": "pwd"})
 
         self.assertEqual(_section(result, "stdout", "stderr"), str(Path.cwd()))
 
@@ -105,8 +104,7 @@ class BashToolTests(unittest.TestCase):
                 "BASH_ENV": str(startup),
             }
             with patch.dict(os.environ, environment):
-                result = self.registry.execute(
-                    "bash",
+                result = run_bash(
                     {
                         "cmd": (
                             "printf '%s|%s|%s|%s' "
@@ -147,8 +145,7 @@ class BashToolTests(unittest.TestCase):
         started = time.monotonic()
 
         with self.assertRaisesRegex(ToolExecutionError, "timed_out: true"):
-            self.registry.execute(
-                "bash",
+            run_bash(
                 {
                     "cmd": "sleep 5 &",
                     "timeout": MIN_BASH_TIMEOUT_SECONDS,
@@ -196,10 +193,7 @@ class BashToolTests(unittest.TestCase):
         self.assertIn("timed_out: true", str(raised.exception))
 
     def test_oversized_output_is_self_contained_and_readable_by_range(self) -> None:
-        result = self.registry.execute(
-            "bash",
-            {"cmd": "printf 'x%.0s' {1..20000}"},
-        )
+        result = run_bash({"cmd": "printf 'x%.0s' {1..20000}"})
         stdout_offset = result.index("--- stdout ---\n") + len("--- stdout ---\n")
         session = Session.create(in_memory=True)
         prompt = session.accept_prompt("run")
@@ -251,7 +245,7 @@ class BashToolTests(unittest.TestCase):
             for arguments in cases:
                 with self.subTest(arguments=arguments):
                     with self.assertRaises(ToolExecutionError):
-                        self.registry.execute("bash", arguments)
+                        run_bash(arguments)
 
         with patch("alpha_forge.tools.bash.shutil.which", return_value=None):
             with self.assertRaisesRegex(ToolExecutionError, "not found"):

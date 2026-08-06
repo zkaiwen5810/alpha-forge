@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from alpha_forge.json_values import thaw_json
 from alpha_forge.providers.base import (
     ModelOutputItem,
     OutputMessage,
@@ -33,7 +34,6 @@ from alpha_forge.transcript.events import (
     TranscriptEvent,
 )
 from alpha_forge.transcript.records import SCHEMA_VERSION, TranscriptRecord
-from alpha_forge.json_values import thaw_json
 
 
 def encode_record(record: TranscriptRecord) -> dict[str, Any]:
@@ -118,8 +118,7 @@ def _encode_event(event: TranscriptEvent) -> dict[str, Any]:
                 "parameters": thaw_json(event.policy.parameters),
             },
             "operations": [
-                _encode_context_operation(operation)
-                for operation in event.operations
+                _encode_context_operation(operation) for operation in event.operations
             ],
         }
     if isinstance(event, QueryFailed):
@@ -173,9 +172,7 @@ def _decode_event(event_type: str, payload: dict[str, Any]) -> TranscriptEvent:
             level = _str(message, "level")
             if level not in ("notice", "error"):
                 raise ValueError(f"invalid command message level: {level}")
-            messages.append(
-                CommandMessage(_str(message, "content"), cast(Any, level))
-            )
+            messages.append(CommandMessage(_str(message, "content"), cast(Any, level)))
         return CommandCompleted(
             _str(payload, "command_event_id"),
             cast(Any, status),
@@ -184,9 +181,7 @@ def _decode_event(event_type: str, payload: dict[str, Any]) -> TranscriptEvent:
     if event_type == "model.output":
         return ModelOutput(
             prompt_event_id=_str(payload, "prompt_event_id"),
-            items=tuple(
-                _decode_output_item(item) for item in _list(payload, "items")
-            ),
+            items=tuple(_decode_output_item(item) for item in _list(payload, "items")),
             finish_reason=_optional_str(payload, "finish_reason"),
             usage=_decode_usage(payload.get("usage")),
         )

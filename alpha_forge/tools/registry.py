@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
-
 from alpha_forge.tools.base import (
     Tool,
-    ToolExecutionError,
     ToolNotFoundError,
     ToolSpec,
 )
+from alpha_forge.tools.validation import ToolInputValidator
 
 
 class ToolRegistry:
     def __init__(self, tools: list[Tool] | None = None) -> None:
         self._tools: dict[str, Tool] = {}
         self._lookup: dict[str, Tool] = {}
+        self._validators: dict[str, ToolInputValidator] = {}
         for tool in tools or []:
             self.register(tool)
 
@@ -35,6 +33,7 @@ class ToolRegistry:
             names = ", ".join(repr(identifier) for identifier in collisions)
             raise ValueError(f"tool name or alias already registered: {names}")
         self._tools[tool.name] = tool
+        self._validators[tool.name] = ToolInputValidator(tool.spec.input_schema)
         for identifier in identifiers:
             self._lookup[identifier] = tool
 
@@ -50,19 +49,8 @@ class ToolRegistry:
     def copy(self) -> ToolRegistry:
         return ToolRegistry(list(self._tools.values()))
 
-    def execute(self, name_or_alias: str, arguments: Mapping[str, Any]) -> str:
-        tool = self.get(name_or_alias)
-        try:
-            result = tool.handler(arguments)
-        except ToolExecutionError:
-            raise
-        except Exception as exc:
-            raise ToolExecutionError(str(exc)) from exc
-        if not isinstance(result, str):
-            raise ToolExecutionError(
-                f"tool {tool.name!r} returned {type(result).__name__}, expected str"
-            )
-        return result
+    def _validator_for(self, tool: Tool) -> ToolInputValidator:
+        return self._validators[tool.name]
 
 
 __all__ = ["ToolRegistry"]

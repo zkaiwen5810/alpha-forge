@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from alpha_forge.json_values import FrozenJsonObject
+from alpha_forge.tools.validation import check_input_schema
 
 ToolHandler = Callable[[Mapping[str, Any]], str]
 
@@ -44,6 +45,7 @@ class ToolSpec:
             "input_schema",
             FrozenJsonObject(input_schema),
         )
+        check_input_schema(self.input_schema)
 
 
 @dataclass(frozen=True, slots=True, init=False)

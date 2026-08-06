@@ -109,9 +109,27 @@ Design intent:
 ### Tool calling
 
 Tool definitions and execution are isolated in `alpha_forge.tools`.
-`ToolRegistry` stores provider-neutral `ToolSpec` values and dispatches calls;
-OpenAI schema generation belongs only to the OpenAI provider adapter.
+`ToolRegistry` stores provider-neutral `ToolSpec` values; `ToolExecutor` is the
+single dispatch boundary. OpenAI schema generation belongs only to the OpenAI
+provider adapter.
 `load_builtin_tools()` creates the default registry.
+
+Every completed tool call is decoded as strict JSON and validated locally
+against its declared Draft 2020-12 JSON Schema before any hook or handler can
+run. Invalid schemas fail when a tool is defined, and invalid inputs become
+ordinary error tool results. Local enforcement remains active when the OpenAI
+SDK is routed through an OpenAI-compatible gateway; it does not depend on the
+provider producing schema-constrained arguments.
+
+Lifecycle hooks provide an ordered, application-side interception layer.
+`PreToolExecution` exposes the call ID, canonical tool name, and an immutable
+copy of the validated input. A hook registration pairs a typed matcher with an
+async action; all matching hooks run in registration order, and the first
+failure prevents execution. The terminal CLI installs a permission action for
+`bash` and `file_writer`. Each matching call pauses for one explicit approval;
+denial is recorded as an error tool result. Calculator, file reads, and raw
+tool-result paging remain automatic. Programmatic coordinators do not install
+permission hooks unless the caller opts in.
 
 The default registry includes a safe `calculator` tool, a bounded UTF-8
 `file_reader`, a UTF-8 `file_writer`, and a non-interactive `bash` tool. The file
@@ -191,6 +209,24 @@ registry = ToolRegistry([
 ])
 coordinator = ApplicationCoordinator(config, tool_registry=registry)
 ```
+
+Programmatic callers can register the same permission action or any other
+pre-execution action:
+
+```python
+from alpha_forge.hooks import Hook, PermissionAction, match_tool_names
+
+coordinator.hooks.register(
+    Hook(
+        match_tool_names("greet"),
+        PermissionAction(coordinator.request_tool_permission),
+    )
+)
+```
+
+`request_tool_permission` publishes ephemeral application events that a UI must
+resolve with `resolve_tool_permission`. Headless applications can instead use a
+custom async action or permission requester.
 
 ### Transcript and history projections
 

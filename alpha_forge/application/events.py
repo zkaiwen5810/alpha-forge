@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from alpha_forge.events import Event
+from alpha_forge.hooks import PreToolExecution
 from alpha_forge.projectors.ui_history import UiHistoryItem
 from alpha_forge.providers.base import ToolCall
 from alpha_forge.query.protocol import (
@@ -61,6 +62,18 @@ class ToolResultRecorded(ApplicationEvent):
 
 
 @dataclass(frozen=True, slots=True)
+class ToolPermissionRequested(ApplicationEvent):
+    request_id: str
+    event: PreToolExecution
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPermissionResolved(ApplicationEvent):
+    request_id: str
+    allowed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PersistenceFailed(ApplicationEvent):
     stage: str
     message: str
@@ -102,5 +115,7 @@ __all__ = [
     "SessionViewChanged",
     "StatusChanged",
     "ToolResultRecorded",
+    "ToolPermissionRequested",
+    "ToolPermissionResolved",
     "ToolStarted",
 ]

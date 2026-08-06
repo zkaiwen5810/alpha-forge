@@ -8,6 +8,8 @@ from alpha_forge.tools import (
     MAX_FILE_READ_CHARS,
     ToolExecutionError,
     load_builtin_tools,
+    read_file,
+    write_file,
 )
 
 
@@ -34,14 +36,8 @@ class FileReaderTests(unittest.TestCase):
             path = Path(tmp) / "unicode.txt"
             path.write_text("aβc\r\ndef", encoding="utf-8", newline="")
 
-            first = self.registry.execute(
-                "read_file",
-                {"path": str(path), "offset": 1, "limit": 4},
-            )
-            second = self.registry.execute(
-                "file_reader",
-                {"path": str(path), "offset": 5, "limit": 20},
-            )
+            first = read_file({"path": str(path), "offset": 1, "limit": 4})
+            second = read_file({"path": str(path), "offset": 5, "limit": 20})
 
         self.assertIn("offset: 1", first)
         self.assertIn("returned_chars: 4", first)
@@ -57,10 +53,7 @@ class FileReaderTests(unittest.TestCase):
             path = Path(tmp) / "large.txt"
             path.write_text("x" * (MAX_FILE_READ_CHARS + 1), encoding="utf-8")
 
-            result = self.registry.execute(
-                "file_reader",
-                {"path": str(path), "limit": MAX_FILE_READ_CHARS},
-            )
+            result = read_file({"path": str(path), "limit": MAX_FILE_READ_CHARS})
 
         self.assertLessEqual(len(result), MAX_TOOL_RESULT_CHARS)
         self.assertEqual(len(_read_content(result)), MAX_FILE_READ_CHARS)
@@ -87,7 +80,7 @@ class FileReaderTests(unittest.TestCase):
             for arguments in cases:
                 with self.subTest(arguments=arguments):
                     with self.assertRaises(ToolExecutionError):
-                        self.registry.execute("file_reader", arguments)
+                        read_file(arguments)
 
 
 class FileWriterTests(unittest.TestCase):
@@ -99,8 +92,7 @@ class FileWriterTests(unittest.TestCase):
             path = Path(tmp) / "nested" / "document.txt"
 
             created = json.loads(
-                self.registry.execute(
-                    "write_file",
+                write_file(
                     {
                         "path": str(path),
                         "operation": "create",
@@ -108,8 +100,7 @@ class FileWriterTests(unittest.TestCase):
                     },
                 )
             )
-            self.registry.execute(
-                "file_writer",
+            write_file(
                 {
                     "path": str(path),
                     "operation": "append",
@@ -117,8 +108,7 @@ class FileWriterTests(unittest.TestCase):
                 },
             )
             replaced = json.loads(
-                self.registry.execute(
-                    "file_writer",
+                write_file(
                     {
                         "path": str(path),
                         "operation": "replace",
@@ -136,8 +126,7 @@ class FileWriterTests(unittest.TestCase):
             self.assertEqual(replaced["replacements"], 1)
 
             written = json.loads(
-                self.registry.execute(
-                    "file_writer",
+                write_file(
                     {
                         "path": str(path),
                         "operation": "write",
@@ -155,8 +144,7 @@ class FileWriterTests(unittest.TestCase):
             path.write_text("keep", encoding="utf-8")
 
             with self.assertRaises(ToolExecutionError):
-                self.registry.execute(
-                    "file_writer",
+                write_file(
                     {
                         "path": str(path),
                         "operation": "create",
@@ -172,8 +160,7 @@ class FileWriterTests(unittest.TestCase):
             path.write_text("same same", encoding="utf-8")
 
             with self.assertRaisesRegex(ToolExecutionError, "found 2"):
-                self.registry.execute(
-                    "file_writer",
+                write_file(
                     {
                         "path": str(path),
                         "operation": "replace",
@@ -184,8 +171,7 @@ class FileWriterTests(unittest.TestCase):
 
             self.assertEqual(path.read_text(encoding="utf-8"), "same same")
 
-            self.registry.execute(
-                "file_writer",
+            write_file(
                 {
                     "path": str(path),
                     "operation": "replace",
@@ -202,8 +188,7 @@ class FileWriterTests(unittest.TestCase):
             path = parent / "file.txt"
 
             with self.assertRaisesRegex(ToolExecutionError, "does not exist"):
-                self.registry.execute(
-                    "file_writer",
+                write_file(
                     {
                         "path": str(path),
                         "operation": "replace",
@@ -232,7 +217,7 @@ class FileWriterTests(unittest.TestCase):
             for arguments in cases:
                 with self.subTest(arguments=arguments):
                     with self.assertRaises(ToolExecutionError):
-                        self.registry.execute("file_writer", arguments)
+                        write_file(arguments)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,12 @@ from alpha_forge.context import (
     ToolResultBudgetPolicy,
     ToolResultContext,
 )
+from alpha_forge.hooks import (
+    Hook,
+    HookRegistry,
+    PermissionAction,
+    match_tool_names,
+)
 from alpha_forge.providers import (
     OutputMessage,
     OutputText,
@@ -57,6 +63,64 @@ async def _consume_one(
 
 
 class QueryFlowTests(unittest.TestCase):
+    def test_permission_denial_is_committed_as_error_tool_result(self) -> None:
+        provider = ScriptedProvider(
+            [
+                ProviderOutput(
+                    (ToolCall("call", "file_writer", '{"value":"x"}'),)
+                ),
+                _text("continued after denial"),
+            ]
+        )
+        invoked: list[str] = []
+        registry = ToolRegistry(
+            [
+                Tool(
+                    name="file_writer",
+                    description="write",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                        "additionalProperties": False,
+                    },
+                    handler=lambda _arguments: invoked.append("handler") or "done",
+                )
+            ]
+        )
+
+        async def deny(_event):  # type: ignore[no-untyped-def]
+            return False
+
+        hooks = HookRegistry(
+            [
+                Hook(
+                    match_tool_names("file_writer"),
+                    PermissionAction(deny),
+                )
+            ]
+        )
+        session = Session.create(in_memory=True)
+        coordinator = ApplicationCoordinator(
+            Config("key"),
+            provider=provider,
+            tool_registry=registry,
+            session=session,
+            hooks=hooks,
+        )
+
+        asyncio.run(_consume_one(coordinator, "write"))
+
+        result = next(
+            event
+            for event in session.transcript.events
+            if isinstance(event, ToolResult)
+        )
+        self.assertEqual(result.status, "error")
+        self.assertIn("permission denied", result.content)
+        self.assertEqual(invoked, [])
+        self.assertEqual(len(provider.contexts), 2)
+
     def test_multiple_provider_requests_use_fresh_committed_projection(self) -> None:
         provider = ScriptedProvider(
             [

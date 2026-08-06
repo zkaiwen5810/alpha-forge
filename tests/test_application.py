@@ -6,8 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from alpha_forge.application import ApplicationCoordinator
+from alpha_forge.application.events import (
+    ToolPermissionRequested,
+    ToolPermissionResolved,
+)
 from alpha_forge.config import Config
 from alpha_forge.context import UserMessage
+from alpha_forge.hooks import PreToolExecution
+from alpha_forge.json_values import FrozenJsonObject
 from alpha_forge.providers import (
     OutputMessage,
     OutputText,
@@ -43,6 +49,45 @@ class EchoProvider:
 
 
 class SessionAndCoordinatorTests(unittest.TestCase):
+    def test_permission_request_is_ephemeral_and_resolves_once(self) -> None:
+        session = Session.create(in_memory=True)
+        coordinator = ApplicationCoordinator(
+            Config("key"),
+            provider=EchoProvider(),
+            session=session,
+        )
+        events = []
+        coordinator.events.subscribe(ToolPermissionRequested, events.append)
+        coordinator.events.subscribe(ToolPermissionResolved, events.append)
+        lifecycle = PreToolExecution(
+            call_id="call",
+            tool_name="bash",
+            tool_input=FrozenJsonObject({"cmd": "pwd"}),
+        )
+
+        async def run():
+            pending = asyncio.create_task(
+                coordinator.request_tool_permission(lifecycle)
+            )
+            await asyncio.sleep(0)
+            request = events[0]
+            self.assertIsInstance(request, ToolPermissionRequested)
+            self.assertTrue(
+                coordinator.resolve_tool_permission(request.request_id, True)
+            )
+            self.assertFalse(
+                coordinator.resolve_tool_permission(request.request_id, False)
+            )
+            return await pending
+
+        self.assertTrue(asyncio.run(run()))
+        self.assertEqual(
+            [type(event) for event in events],
+            [ToolPermissionRequested, ToolPermissionResolved],
+        )
+        self.assertEqual(session.revision, 1)
+        session.close()
+
     def test_clear_destination_is_not_persisted_until_it_accepts_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict(os.environ, {"XDG_DATA_HOME": tmp}):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import textwrap
 
 from prompt_toolkit.application import Application
@@ -22,13 +23,20 @@ from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.output.base import Output
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.widgets import Button, Dialog, Label, TextArea
 
 from alpha_forge.application.coordinator import ApplicationCoordinator
-from alpha_forge.application.events import ExitReady
+from alpha_forge.application.events import (
+    ExitReady,
+    ToolPermissionRequested,
+    ToolPermissionResolved,
+)
 from alpha_forge.events import Event
+from alpha_forge.json_values import thaw_json
 from alpha_forge.slash_commands import SLASH_COMMANDS
 from alpha_forge.ui_state import ChatUiState
+
+MAX_PERMISSION_PREVIEW_CHARS = 2_000
 
 
 class HistoryControl(UIControl):
@@ -89,6 +97,26 @@ class TerminalChatUi:
             height=Dimension(preferred=4, max=6),
             style="class:pending",
         )
+        self.permission_deny_button = Button(
+            "Deny",
+            handler=lambda: self._resolve_tool_permission(False),
+        )
+        self.permission_allow_button = Button(
+            "Allow once",
+            handler=lambda: self._resolve_tool_permission(True),
+        )
+        self.permission_dialog = Dialog(
+            title="Tool Permission",
+            body=Label(
+                text=self._render_permission_request,
+                style="class:permission",
+            ),
+            buttons=[
+                self.permission_deny_button,
+                self.permission_allow_button,
+            ],
+            modal=True,
+        )
         self.slash_suggestions_area = TextArea(
             read_only=True,
             focusable=True,
@@ -106,6 +134,14 @@ class TerminalChatUi:
             auto_suggest=AutoSuggestFromHistory(),
             accept_handler=self._accept_input,
             style="class:input",
+        )
+        self.permission_container = ConditionalContainer(
+            self.permission_dialog,
+            filter=Condition(self._has_pending_permission),
+        )
+        self.input_container = ConditionalContainer(
+            self.input_area,
+            filter=~Condition(self._has_pending_permission),
         )
         self.input_area.buffer.on_text_changed += self._input_changed
         self._route_scroll_events_to_history(self.input_area.control)
@@ -181,7 +217,8 @@ class TerminalChatUi:
                     ),
                     filter=Condition(self._has_pending_prompts),
                 ),
-                self.input_area,
+                self.permission_container,
+                self.input_container,
                 ConditionalContainer(
                     HSplit(
                         [
@@ -201,7 +238,12 @@ class TerminalChatUi:
     def _has_pending_prompts(self) -> bool:
         return bool(self.ui_state.pending_inputs)
 
+    def _has_pending_permission(self) -> bool:
+        return self.ui_state.pending_permission is not None
+
     def _should_show_slash_suggestions(self) -> bool:
+        if self._has_pending_permission():
+            return False
         text = self.input_area.text
         return text.startswith("/") and " " not in text
 
@@ -313,6 +355,7 @@ class TerminalChatUi:
 
     def _key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
+        permission_pending = Condition(self._has_pending_permission)
 
         @bindings.add("c-c")
         def _handle_ctrl_c(_event) -> None:  # type: ignore[no-untyped-def]
@@ -323,9 +366,13 @@ class TerminalChatUi:
             if not self.input_area.text:
                 self.controller.request_exit()
 
-        @bindings.add("tab")
+        @bindings.add("tab", filter=~permission_pending)
         def _handle_tab(_event) -> None:  # type: ignore[no-untyped-def]
             self._complete_slash_command()
+
+        @bindings.add("escape", filter=permission_pending)
+        def _deny_permission(_event) -> None:  # type: ignore[no-untyped-def]
+            self._resolve_tool_permission(False)
 
         @bindings.add("pageup")
         def _handle_pageup(_event) -> None:  # type: ignore[no-untyped-def]
@@ -376,10 +423,46 @@ class TerminalChatUi:
 
     def _handle_application_event(self, event: Event) -> None:
         changed = self.ui_state.handle(event)
+        self._handle_permission_event(event)
         if isinstance(event, ExitReady):
             self.exit(event.exit_code)
         if changed:
             self.refresh()
+
+    def _handle_permission_event(self, event: Event) -> None:
+        if isinstance(event, ToolPermissionRequested):
+            self.app.layout.focus(self.permission_deny_button)
+        elif isinstance(event, ToolPermissionResolved):
+            self.app.layout.focus(self.input_area)
+
+    def _resolve_tool_permission(self, allowed: bool) -> None:
+        pending = self.ui_state.pending_permission
+        if pending is not None:
+            self.controller.resolve_tool_permission(
+                pending.request_id,
+                allowed,
+            )
+
+    def _render_permission_request(self) -> str:
+        pending = self.ui_state.pending_permission
+        if pending is None:
+            return ""
+        serialized = json.dumps(
+            thaw_json(pending.event.tool_input),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if len(serialized) > MAX_PERMISSION_PREVIEW_CHARS:
+            omitted = len(serialized) - MAX_PERMISSION_PREVIEW_CHARS
+            serialized = (
+                serialized[:MAX_PERMISSION_PREVIEW_CHARS]
+                + f"… [{omitted} characters omitted]"
+            )
+        return (
+            f"Tool: {pending.event.tool_name}\n"
+            f"Arguments: {serialized}\n"
+            "Select Deny or Allow once. Escape denies."
+        )
 
     def _route_scroll_events_to_history(  # type: ignore[no-untyped-def]
         self,
@@ -484,6 +567,11 @@ class TerminalChatUi:
                 "history": "",
                 "active": "",
                 "pending": "",
+                "permission": "#ffdf5f",
+                "dialog.body": "",
+                "frame.label": "bold #ffdf5f",
+                "button": "#bbbbbb",
+                "button.focused": "reverse",
                 "input": "",
                 "slash-suggestions": "#bbbbbb",
                 "scrollbar.background": "#666666",

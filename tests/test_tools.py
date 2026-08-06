@@ -7,6 +7,7 @@ from alpha_forge.tools import (
     ToolRegistry,
     load_builtin_tools,
 )
+from alpha_forge.tools.calculator import calculate
 
 
 def _echo(arguments):  # type: ignore[no-untyped-def]
@@ -32,7 +33,6 @@ class ToolRegistryTests(unittest.TestCase):
 
         self.assertIs(registry.get("echo"), tool)
         self.assertIs(registry.get("repeat"), tool)
-        self.assertEqual(registry.execute("repeat", {"value": "hello"}), "hello")
         self.assertEqual(registry.specs(), (tool.spec,))
         self.assertEqual(tool.spec.name, "echo")
         self.assertEqual(tool.spec.description, "Model-facing instructions.")
@@ -78,6 +78,15 @@ class ToolRegistryTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             tool.input_schema["new"] = {}  # type: ignore[index]
 
+    def test_rejects_invalid_json_schema_at_definition_time(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid tool input schema"):
+            Tool(
+                name="invalid",
+                description="invalid",
+                input_schema={"type": "not-a-json-schema-type"},
+                handler=lambda _arguments: "never",
+            )
+
 
 class CalculatorTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -98,10 +107,7 @@ class CalculatorTests(unittest.TestCase):
         for expression, expected in cases.items():
             with self.subTest(expression=expression):
                 self.assertEqual(
-                    self.registry.execute(
-                        "calculator",
-                        {"expression": expression},
-                    ),
+                    calculate({"expression": expression}),
                     expected,
                 )
 
@@ -116,10 +122,7 @@ class CalculatorTests(unittest.TestCase):
         for expression in expressions:
             with self.subTest(expression=expression):
                 with self.assertRaises(ToolExecutionError):
-                    self.registry.execute(
-                        "calculator",
-                        {"expression": expression},
-                    )
+                    calculate({"expression": expression})
 
         with self.assertRaises(ToolExecutionError):
-            self.registry.execute("calculator", {"expression": ""})
+            calculate({"expression": ""})

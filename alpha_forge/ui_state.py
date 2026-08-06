@@ -18,6 +18,8 @@ from alpha_forge.application.events import (
     SessionView,
     SessionViewChanged,
     StatusChanged,
+    ToolPermissionRequested,
+    ToolPermissionResolved,
     ToolResultRecorded,
     ToolStarted,
 )
@@ -119,6 +121,7 @@ class ChatUiState:
         self.exiting = False
         self.persistence_error: str | None = None
         self.tool_result_preview = tool_result_preview or TailLinesUiToolResultPreview()
+        self.pending_permission: ToolPermissionRequested | None = None
         self._queued_inputs: dict[str, str] = {}
         self._cache_revision: int | None = None
         self._transcript_cache: tuple[HistoryLine, ...] = ()
@@ -169,12 +172,23 @@ class ChatUiState:
         elif isinstance(event, ToolStarted):
             self.active = ActiveTool(event.model_output_event_id, event.call)
             self.status = f"Running tool: {event.call.name}"
+        elif isinstance(event, ToolPermissionRequested):
+            self.pending_permission = event
+            self.status = f"Approval required: {event.event.tool_name}"
+        elif isinstance(event, ToolPermissionResolved):
+            if (
+                self.pending_permission is not None
+                and self.pending_permission.request_id == event.request_id
+            ):
+                self.pending_permission = None
+            self.status = "Running approved tool" if event.allowed else "Denying tool"
         elif isinstance(event, ToolResultRecorded):
             if (
                 isinstance(self.active, ActiveTool)
                 and self.active.call.call_id == event.call_id
             ):
                 self.active = None
+            self.pending_permission = None
             self.status = self._queue_status()
         elif isinstance(event, PersistenceFailed):
             self.persistence_error = event.message
@@ -189,6 +203,7 @@ class ChatUiState:
             self.status = f"Cannot persist {event.stage}: {event.message}"
         elif isinstance(event, RequestFailed):
             self.active = None
+            self.pending_permission = None
             self.status = f"Request failed: {event.message}"
         elif isinstance(event, StatusChanged):
             self.status = event.message

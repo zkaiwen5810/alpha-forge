@@ -203,6 +203,7 @@ class OpenAIChatAdapterTests(unittest.TestCase):
             completions.request["tools"][0]["function"]["name"],
             "calculator",
         )
+        self.assertNotIn("strict", completions.request["tools"][0]["function"])
 
     def test_list_models_returns_sorted_ids(self) -> None:
         adapter = self._adapter(FakeAsyncCompletions())

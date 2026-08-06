@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
+from alpha_forge.hooks import HookRegistry, PreToolExecution
+from alpha_forge.json_values import FrozenJsonObject
 from alpha_forge.providers.base import ToolCall
-from alpha_forge.tools.base import ToolError
+from alpha_forge.tools.base import Tool, ToolExecutionError
 from alpha_forge.tools.registry import ToolRegistry
 
 
@@ -25,25 +27,57 @@ class ToolCallExecutor(Protocol):
 
 
 class ToolExecutor:
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        hooks: HookRegistry | None = None,
+    ) -> None:
         self.registry = registry
+        self.hooks = hooks or HookRegistry()
 
     async def execute(self, call: ToolCall) -> ExecutedToolResult:
-        return await asyncio.to_thread(self._execute_sync, call)
-
-    def _execute_sync(self, call: ToolCall) -> ExecutedToolResult:
         try:
-            arguments = json.loads(call.arguments)
+            arguments = json.loads(
+                call.arguments,
+                parse_constant=_reject_json_constant,
+            )
             if not isinstance(arguments, dict):
                 raise ValueError("arguments must decode to a JSON object")
-            content = self.registry.execute(call.name, arguments)
+            tool = self.registry.get(call.name)
+            self.registry._validator_for(tool).validate(arguments)
+            await self.hooks.dispatch(
+                PreToolExecution(
+                    call_id=call.call_id,
+                    tool_name=tool.name,
+                    tool_input=FrozenJsonObject(arguments),
+                )
+            )
+            content = await asyncio.to_thread(_invoke, tool, arguments)
             return ExecutedToolResult(call.call_id, content)
-        except (json.JSONDecodeError, ValueError, ToolError) as exc:
+        except Exception as exc:
             return ExecutedToolResult(
                 call.call_id,
-                f"error: {exc}",
+                f"error: {str(exc) or type(exc).__name__}",
                 "error",
             )
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def _invoke(tool: Tool, arguments: dict[str, Any]) -> str:
+    try:
+        result = tool.handler(arguments)
+    except ToolExecutionError:
+        raise
+    except Exception as exc:
+        raise ToolExecutionError(str(exc) or type(exc).__name__) from exc
+    if not isinstance(result, str):
+        raise ToolExecutionError(
+            f"tool {tool.name!r} returned {type(result).__name__}, expected str"
+        )
+    return result
 
 
 __all__ = ["ExecutedToolResult", "ToolCallExecutor", "ToolExecutor"]

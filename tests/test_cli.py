@@ -1,5 +1,10 @@
+import asyncio
 import unittest
 
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
+
+from alpha_forge.application import ApplicationCoordinator
 from alpha_forge.application.events import (
     InputQueued,
     InputStarted,
@@ -10,8 +15,13 @@ from alpha_forge.application.events import (
     RequestFailed,
     SessionView,
     SessionViewChanged,
+    ToolPermissionRequested,
+    ToolPermissionResolved,
 )
 from alpha_forge.cli import build_parser
+from alpha_forge.config import Config
+from alpha_forge.hooks import PreToolExecution
+from alpha_forge.json_values import FrozenJsonObject
 from alpha_forge.providers import (
     OutputMessage,
     OutputText,
@@ -26,6 +36,9 @@ from alpha_forge.projectors.ui_history import (
     UiQueryFailure,
     UiToolResult,
 )
+from alpha_forge.sessions import Session
+from alpha_forge.terminal_ui import MAX_PERMISSION_PREVIEW_CHARS, TerminalChatUi
+from alpha_forge.tools import Tool, ToolExecutor, ToolRegistry
 from alpha_forge.ui_state import ChatUiState
 
 
@@ -39,6 +52,53 @@ class CliSurfaceTests(unittest.TestCase):
         }
         self.assertNotIn("--api-key", option_strings)
         self.assertIn("--base-url", option_strings)
+
+    def test_cli_permissions_match_only_bash_and_file_writer(self) -> None:
+        class Provider:
+            def list_models(self):
+                return ["gpt-test"]
+
+        invoked: list[str] = []
+        registry = ToolRegistry(
+            [
+                Tool(
+                    name=name,
+                    description=name,
+                    input_schema={
+                        "type": "object",
+                        "additionalProperties": False,
+                    },
+                    handler=lambda _arguments, name=name: invoked.append(name) or name,
+                )
+                for name in ("calculator", "file_writer", "bash")
+            ]
+        )
+        controller = ApplicationCoordinator(
+            Config("key"),
+            provider=Provider(),
+            session=Session.create(in_memory=True),
+        )
+        requests: list[ToolPermissionRequested] = []
+
+        def deny(event: ToolPermissionRequested) -> None:
+            requests.append(event)
+            controller.resolve_tool_permission(event.request_id, False)
+
+        controller.events.subscribe(ToolPermissionRequested, deny)
+        executor = ToolExecutor(registry, controller.hooks)
+
+        safe = asyncio.run(
+            executor.execute(ToolCall("safe", "calculator", "{}"))
+        )
+        denied = asyncio.run(
+            executor.execute(ToolCall("denied", "bash", "{}"))
+        )
+
+        self.assertEqual(safe.status, "success")
+        self.assertEqual(denied.status, "error")
+        self.assertEqual([event.event.tool_name for event in requests], ["bash"])
+        self.assertEqual(invoked, ["calculator"])
+        controller.session.close()
 
 
 class UiStateTests(unittest.TestCase):
@@ -54,6 +114,23 @@ class UiStateTests(unittest.TestCase):
         self.state.handle(InputStarted("one"))
         self.assertEqual(self.state.pending_inputs, [])
         self.assertEqual(self.state.status, "Ready")
+
+    def test_permission_request_and_resolution_are_ephemeral(self) -> None:
+        lifecycle = PreToolExecution(
+            call_id="call",
+            tool_name="bash",
+            tool_input=FrozenJsonObject({"cmd": "pwd"}),
+        )
+
+        self.state.handle(ToolPermissionRequested("request", lifecycle))
+
+        self.assertEqual(self.state.pending_permission.request_id, "request")
+        self.assertEqual(self.state.status, "Approval required: bash")
+        self.assertEqual(self.state.transcript_text(), "No messages yet.")
+
+        self.state.handle(ToolPermissionResolved("request", False))
+        self.assertIsNone(self.state.pending_permission)
+        self.assertEqual(self.state.status, "Denying tool")
 
     def test_provider_draft_is_ephemeral_until_committed_view(self) -> None:
         self.state.handle(ProviderRequestStarted("prompt", "request"))
@@ -215,6 +292,63 @@ class UiStateTests(unittest.TestCase):
                 for line in state.transcript_lines()
             )
         )
+
+
+class TerminalPermissionUiTests(unittest.TestCase):
+    def test_permission_mode_preserves_draft_and_bounds_argument_preview(self) -> None:
+        class Provider:
+            def list_models(self):
+                return ["gpt-test"]
+
+        controller = ApplicationCoordinator(
+            Config("key"),
+            provider=Provider(),
+            session=Session.create(in_memory=True),
+        )
+        lifecycle = PreToolExecution(
+            call_id="call",
+            tool_name="file_writer",
+            tool_input=FrozenJsonObject({"content": "x" * 3_000}),
+        )
+
+        with create_pipe_input() as input:
+            ui = TerminalChatUi(controller, input=input, output=DummyOutput())
+            ui.input_area.text = "draft prompt"
+
+            async def approve() -> bool:
+                pending = asyncio.create_task(
+                    controller.request_tool_permission(lifecycle)
+                )
+                await asyncio.sleep(0)
+
+                self.assertEqual(ui.input_area.text, "draft prompt")
+                self.assertIs(
+                    ui.app.layout.current_control,
+                    ui.permission_deny_button.control,
+                )
+                self.assertTrue(ui.permission_container.filter())
+                self.assertFalse(ui.input_container.filter())
+                preview = ui._render_permission_request()
+                self.assertIn("file_writer", preview)
+                self.assertIn("characters omitted", preview)
+                self.assertLess(
+                    len(preview),
+                    MAX_PERMISSION_PREVIEW_CHARS + 200,
+                )
+
+                ui.permission_allow_button.handler()
+                return await pending
+
+            self.assertTrue(asyncio.run(approve()))
+            self.assertEqual(ui.input_area.text, "draft prompt")
+            self.assertIs(
+                ui.app.layout.current_control,
+                ui.input_area.control,
+            )
+            self.assertFalse(ui.permission_container.filter())
+            self.assertTrue(ui.input_container.filter())
+            ui._event_subscription.unsubscribe()
+        controller.session.close()
 
 
 if __name__ == "__main__":

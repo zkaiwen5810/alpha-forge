@@ -23,6 +23,8 @@ from alpha_forge.application.events import (
     SessionView,
     SessionViewChanged,
     StatusChanged,
+    ToolPermissionRequested,
+    ToolPermissionResolved,
     ToolResultRecorded,
     ToolStarted,
 )
@@ -30,6 +32,13 @@ from alpha_forge.config import Config
 from alpha_forge.context.pipeline import ContextPipeline
 from alpha_forge.context.tool_result_budget import ToolResultBudgetPolicy
 from alpha_forge.events import EventRouter
+from alpha_forge.hooks import (
+    Hook,
+    HookRegistry,
+    PermissionAction,
+    PreToolExecution,
+    match_tool_names,
+)
 from alpha_forge.projectors.session_state import OpenQuery
 from alpha_forge.providers.base import ModelProvider
 from alpha_forge.providers.openai_chat import OpenAIChatAdapter
@@ -91,6 +100,8 @@ class ShutdownInput:
 type UserInput = PromptInput | CommandInput
 type QueueItem = UserInput | ShutdownInput
 
+DEFAULT_PERMISSION_TOOLS = ("bash", "file_writer")
+
 
 class ApplicationCoordinator:
     """Own data flow; domain modules own their state and transformations."""
@@ -106,6 +117,7 @@ class ApplicationCoordinator:
         session: Session | None = None,
         context_pipeline: ContextPipeline | None = None,
         query: QueryEngine | None = None,
+        hooks: HookRegistry | None = None,
     ) -> None:
         self.config = config
         self.provider = provider or OpenAIChatAdapter(config)
@@ -117,11 +129,19 @@ class ApplicationCoordinator:
         )
         self.query = query or QueryEngine(self.provider)
         self.events = EventRouter()
+        self.hooks = hooks or HookRegistry()
+        self.hooks.register(
+            Hook(
+                match_tool_names(*DEFAULT_PERMISSION_TOOLS),
+                PermissionAction(self.request_tool_permission),
+            )
+        )
         self.queue: asyncio.Queue[QueueItem] = asyncio.Queue()
         self._recovery: deque[RecoveryInput] = deque()
         self._accepting = True
         self._shutdown_enqueued = False
         self._persistence_halted = False
+        self._pending_permission: tuple[str, asyncio.Future[bool]] | None = None
         self._schedule_recovery(self.session)
 
     @property
@@ -149,10 +169,42 @@ class ApplicationCoordinator:
         if self._shutdown_enqueued:
             return
         self._accepting = False
+        if self._pending_permission is not None:
+            request_id, _future = self._pending_permission
+            self.resolve_tool_permission(request_id, False)
         self._shutdown_enqueued = True
         item = ShutdownInput(uuid4().hex)
         self.queue.put_nowait(item)
         self.events.publish(ExitRequested())
+
+    async def request_tool_permission(self, event: PreToolExecution) -> bool:
+        """Publish one ephemeral approval request and await its resolution."""
+
+        if self._pending_permission is not None:
+            raise RuntimeError("another tool permission request is already pending")
+        request_id = uuid4().hex
+        future = asyncio.get_running_loop().create_future()
+        self._pending_permission = (request_id, future)
+        self.events.publish(ToolPermissionRequested(request_id, event))
+        try:
+            return await future
+        finally:
+            if self._pending_permission is not None:
+                pending_id, _pending_future = self._pending_permission
+                if pending_id == request_id:
+                    self._pending_permission = None
+
+    def resolve_tool_permission(self, request_id: str, allowed: bool) -> bool:
+        """Resolve the current approval request exactly once."""
+
+        if self._pending_permission is None:
+            return False
+        pending_id, future = self._pending_permission
+        if pending_id != request_id or future.done():
+            return False
+        future.set_result(allowed)
+        self.events.publish(ToolPermissionResolved(request_id, allowed))
+        return True
 
     async def consume(self) -> None:
         try:
@@ -225,7 +277,7 @@ class ApplicationCoordinator:
                 continuation.completed_intermediate_rounds
             ),
             tool_specs=registry.specs(),
-            tool_executor=ToolExecutor(registry),
+            tool_executor=ToolExecutor(registry, self.hooks),
         )
         feedback = None
         try:
