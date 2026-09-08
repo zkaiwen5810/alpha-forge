@@ -21,6 +21,7 @@ class ContextPolicy(Protocol):
         snapshot: ModelContextSnapshot,
     ) -> ContextPolicyDecision:
         """Return declarative operations for one committed context revision."""
+        ...
 
 
 __all__ = ["ContextPolicy", "ContextPolicyDecision"]

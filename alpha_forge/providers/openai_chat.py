@@ -67,7 +67,7 @@ class OpenAIChatAdapter:
         context: ModelContextSnapshot,
         *,
         tools: tuple[ToolSpec, ...],
-    ) -> AsyncGenerator[ProviderStreamEvent, None]:
+    ) -> AsyncGenerator[ProviderStreamEvent]:
         request: dict[str, Any] = {
             "model": self.config.model,
             "messages": [_message_to_openai(item) for item in context.items],

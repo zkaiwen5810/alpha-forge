@@ -14,6 +14,7 @@ CommandAction = Literal["none", "exit", "clear", "resume"]
 class ModelCatalog(Protocol):
     def list_models(self) -> list[str]:
         """Return model IDs visible to the configured OpenAI client."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

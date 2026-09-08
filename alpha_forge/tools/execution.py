@@ -24,6 +24,7 @@ class ExecutedToolResult:
 class ToolCallExecutor(Protocol):
     async def execute(self, call: ToolCall) -> ExecutedToolResult:
         """Execute one complete call without persistence or context editing."""
+        ...
 
 
 class ToolExecutor:

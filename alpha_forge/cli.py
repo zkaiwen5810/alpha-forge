@@ -59,6 +59,8 @@ async def run_repl_async(
     try:
         return await ui.run_async()
     finally:
+        # The UI can stop on EOF or an exception without requesting shutdown.
+        # Ensure the consumer can finish before waiting for it.
         controller.request_exit()
         await consumer_task
 

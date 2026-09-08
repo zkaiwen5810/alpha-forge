@@ -69,6 +69,7 @@ class UiToolResultPreview:
 class UiToolResultPreviewStrategy(Protocol):
     def preview(self, content: str) -> UiToolResultPreview:
         """Bound presentation content without changing model context."""
+        ...
 
 
 class TailLinesUiToolResultPreview:
