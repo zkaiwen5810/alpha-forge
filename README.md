@@ -125,11 +125,11 @@ Lifecycle hooks provide an ordered, application-side interception layer.
 `PreToolExecution` exposes the call ID, canonical tool name, and an immutable
 copy of the validated input. A hook registration pairs a typed matcher with an
 async action; all matching hooks run in registration order, and the first
-failure prevents execution. The terminal CLI installs a permission action for
+failure prevents execution. The application coordinator installs a permission action for
 `bash` and `file_writer`. Each matching call pauses for one explicit approval;
 denial is recorded as an error tool result. Calculator, file reads, and raw
-tool-result paging remain automatic. Programmatic coordinators do not install
-permission hooks unless the caller opts in.
+tool-result paging remain automatic. Programmatic coordinators install the same default hook and must provide
+a handler for approval requests when executing these tools.
 
 The default registry includes a safe `calculator` tool, a bounded UTF-8
 `file_reader`, a UTF-8 `file_writer`, and a non-interactive `bash` tool. The file
@@ -186,7 +186,7 @@ after the exchange is complete. The session-aware `tool_result_reader` pages
 raw results by `result_event_id`. `/resume` and `/clear` share the input FIFO,
 so they select the session used by later queued inputs.
 
-To build a controller with a custom registry:
+To build a coordinator with a custom registry:
 
 ```python
 from alpha_forge.application import ApplicationCoordinator
@@ -216,7 +216,7 @@ pre-execution action:
 ```python
 from alpha_forge.hooks import Hook, PermissionAction, match_tool_names
 
-coordinator.hooks.register(
+coordinator.hook_registry.register(
     Hook(
         match_tool_names("greet"),
         PermissionAction(coordinator.request_tool_permission),
@@ -230,8 +230,13 @@ custom async action or permission requester.
 
 ### Transcript and history projections
 
-See [the transcript architecture](docs/transcript-architecture.md) for the
-event catalog, context operations, recovery boundary, and persistence flow.
+See [the architecture guide](docs/transcript-architecture.md) for the component
+ownership map, event catalog, context operations, recovery boundary, and
+persistence flow. Start with `cli.run_repl_async`, then follow the application
+coordinator and the terminal shell in `alpha_forge/ui/terminal.py`. The shell
+composes history and bottom areas; input, queue, and permission behavior is
+owned inside the bottom area. See [the UI architecture guide](docs/ui-architecture.md)
+for the component interface and update/action flow.
 
 `alpha_forge.transcript` owns a completely new schema-v1 append-only JSONL
 ledger. Its durable events are `session.opened`, `session.linked`,

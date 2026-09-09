@@ -92,7 +92,7 @@ class QueryFlowTests(unittest.TestCase):
         async def deny(_event):  # type: ignore[no-untyped-def]
             return False
 
-        hooks = HookRegistry(
+        hook_registry = HookRegistry(
             [
                 Hook(
                     match_tool_names("file_writer"),
@@ -106,7 +106,7 @@ class QueryFlowTests(unittest.TestCase):
             provider=provider,
             tool_registry=registry,
             session=session,
-            hooks=hooks,
+            hook_registry=hook_registry,
         )
 
         asyncio.run(_consume_one(coordinator, "write"))
@@ -332,7 +332,7 @@ class QueryFlowTests(unittest.TestCase):
             provider=provider,
             session=session,
             tool_registry=registry,
-            query=QueryEngine(provider, max_intermediate_rounds=1),
+            query_engine=QueryEngine(provider, max_intermediate_rounds=1),
         )
 
         asyncio.run(_consume_one(coordinator, "loop"))

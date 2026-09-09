@@ -71,5 +71,5 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
 
 
 class SlashCommandHandler(BaseSlashCommandHandler):
-    def __init__(self, commands: tuple[SlashCommand, ...] = SLASH_COMMANDS) -> None:
-        super().__init__(commands)
+    def __init__(self) -> None:
+        super().__init__(SLASH_COMMANDS)

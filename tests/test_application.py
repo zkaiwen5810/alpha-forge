@@ -21,6 +21,7 @@ from alpha_forge.providers import (
     StreamCompleted,
 )
 from alpha_forge.sessions import Session
+from alpha_forge.sessions.tool_result_reader import ToolResultReader
 from alpha_forge.transcript import (
     CommandCompleted,
     InputAccepted,
@@ -57,8 +58,8 @@ class SessionAndCoordinatorTests(unittest.TestCase):
             session=session,
         )
         events = []
-        coordinator.events.subscribe(ToolPermissionRequested, events.append)
-        coordinator.events.subscribe(ToolPermissionResolved, events.append)
+        coordinator.event_router.subscribe(ToolPermissionRequested, events.append)
+        coordinator.event_router.subscribe(ToolPermissionResolved, events.append)
         lifecycle = PreToolExecution(
             call_id="call",
             tool_name="bash",
@@ -211,7 +212,7 @@ class SessionAndCoordinatorTests(unittest.TestCase):
             content="abcdefghij",
         )
 
-        page = session.read_tool_result(result.event_id, offset=2, limit=4)
+        page = ToolResultReader(session.transcript).read(result.event_id, offset=2, limit=4)
 
         self.assertTrue(page.startswith("cdef"))
         self.assertIn("next_offset: 6", page)

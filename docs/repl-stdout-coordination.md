@@ -101,7 +101,7 @@ mid-response.
 ## The pattern used in this codebase now
 
 The CLI now avoids this class of bug by running a single full-screen
-`prompt_toolkit.application.Application` in `alpha_forge/terminal_ui.py`.
+`prompt_toolkit.application.Application` in `alpha_forge/ui/terminal.py`.
 Conversation history, queued inputs, status text, and the prompt input
 are all prompt-toolkit controls in one layout. Background streaming
 updates mutate in-memory UI state and call `Application.invalidate()`;

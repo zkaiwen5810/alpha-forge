@@ -6,22 +6,24 @@ from prompt_toolkit.output import DummyOutput
 
 from alpha_forge.application import ApplicationCoordinator
 from alpha_forge.application.events import (
-    InputQueued,
-    InputStarted,
     ModelOutputRecorded,
     ProviderDeltaReceived,
     ProviderRequestStarted,
     ProviderResponseCompleted,
-    RequestFailed,
     SessionView,
     SessionViewChanged,
     ToolPermissionRequested,
-    ToolPermissionResolved,
 )
 from alpha_forge.cli import build_parser
 from alpha_forge.config import Config
 from alpha_forge.hooks import PreToolExecution
 from alpha_forge.json_values import FrozenJsonObject
+from alpha_forge.projectors.ui_history import (
+    UiModelOutput,
+    UiPrompt,
+    UiQueryFailure,
+    UiToolResult,
+)
 from alpha_forge.providers import (
     OutputMessage,
     OutputText,
@@ -30,16 +32,11 @@ from alpha_forge.providers import (
     TokenUsage,
     ToolCall,
 )
-from alpha_forge.projectors.ui_history import (
-    UiModelOutput,
-    UiPrompt,
-    UiQueryFailure,
-    UiToolResult,
-)
 from alpha_forge.sessions import Session
-from alpha_forge.terminal_ui import MAX_PERMISSION_PREVIEW_CHARS, TerminalChatUi
 from alpha_forge.tools import Tool, ToolExecutor, ToolRegistry
-from alpha_forge.ui_state import ChatUiState
+from alpha_forge.ui.history_state import HistoryState
+from alpha_forge.ui.permission import MAX_PERMISSION_PREVIEW_CHARS
+from alpha_forge.ui.terminal import TerminalChatUi
 
 
 class CliSurfaceTests(unittest.TestCase):
@@ -73,7 +70,7 @@ class CliSurfaceTests(unittest.TestCase):
                 for name in ("calculator", "file_writer", "bash")
             ]
         )
-        controller = ApplicationCoordinator(
+        coordinator = ApplicationCoordinator(
             Config("key"),
             provider=Provider(),
             session=Session.create(in_memory=True),
@@ -82,10 +79,10 @@ class CliSurfaceTests(unittest.TestCase):
 
         def deny(event: ToolPermissionRequested) -> None:
             requests.append(event)
-            controller.resolve_tool_permission(event.request_id, False)
+            coordinator.resolve_tool_permission(event.request_id, False)
 
-        controller.events.subscribe(ToolPermissionRequested, deny)
-        executor = ToolExecutor(registry, controller.hooks)
+        coordinator.event_router.subscribe(ToolPermissionRequested, deny)
+        executor = ToolExecutor(registry, coordinator.hook_registry)
 
         safe = asyncio.run(
             executor.execute(ToolCall("safe", "calculator", "{}"))
@@ -98,39 +95,12 @@ class CliSurfaceTests(unittest.TestCase):
         self.assertEqual(denied.status, "error")
         self.assertEqual([event.event.tool_name for event in requests], ["bash"])
         self.assertEqual(invoked, ["calculator"])
-        controller.session.close()
+        coordinator.session.close()
 
 
-class UiStateTests(unittest.TestCase):
+class HistoryStateTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.state = ChatUiState(SessionView("session", 1, ()))
-
-    def test_queue_updates_are_reactive_without_becoming_history(self) -> None:
-        self.state.handle(InputQueued("one", "hello"))
-        self.assertEqual(self.state.pending_inputs, ["hello"])
-        self.assertEqual(self.state.status, "1 input queued")
-        self.assertEqual(self.state.transcript_text(), "No messages yet.")
-
-        self.state.handle(InputStarted("one"))
-        self.assertEqual(self.state.pending_inputs, [])
-        self.assertEqual(self.state.status, "Ready")
-
-    def test_permission_request_and_resolution_are_ephemeral(self) -> None:
-        lifecycle = PreToolExecution(
-            call_id="call",
-            tool_name="bash",
-            tool_input=FrozenJsonObject({"cmd": "pwd"}),
-        )
-
-        self.state.handle(ToolPermissionRequested("request", lifecycle))
-
-        self.assertEqual(self.state.pending_permission.request_id, "request")
-        self.assertEqual(self.state.status, "Approval required: bash")
-        self.assertEqual(self.state.transcript_text(), "No messages yet.")
-
-        self.state.handle(ToolPermissionResolved("request", False))
-        self.assertIsNone(self.state.pending_permission)
-        self.assertEqual(self.state.status, "Denying tool")
+        self.state = HistoryState(SessionView("session", 1, ()))
 
     def test_provider_draft_is_ephemeral_until_committed_view(self) -> None:
         self.state.handle(ProviderRequestStarted("prompt", "request"))
@@ -169,13 +139,6 @@ class UiStateTests(unittest.TestCase):
         self.assertIn("You: question", self.state.transcript_text())
         self.assertIn("Assistant: hello", self.state.transcript_text())
 
-    def test_request_failure_clears_ephemeral_draft(self) -> None:
-        self.state.handle(ProviderRequestStarted("prompt", "request"))
-        self.state.handle(ProviderDeltaReceived("request", TextDelta("partial")))
-        self.state.handle(RequestFailed("boom"))
-        self.assertEqual(self.state.active_text(), "")
-        self.assertEqual(self.state.status, "Request failed: boom")
-
     def test_tool_results_render_beside_calls_with_only_latest_usage(self) -> None:
         first_call = ToolCall("call-one", "calculator", '{"expression":"1+1"}')
         second_call = ToolCall("call-two", "calculator", '{"expression":"2+2"}')
@@ -184,7 +147,7 @@ class UiStateTests(unittest.TestCase):
             "calculator",
             '{"expression":"3+3"}',
         )
-        state = ChatUiState(
+        state = HistoryState(
             SessionView(
                 "session",
                 9,
@@ -264,7 +227,7 @@ class UiStateTests(unittest.TestCase):
         )
 
     def test_latest_failed_prompt_suppresses_stale_usage(self) -> None:
-        state = ChatUiState(
+        state = HistoryState(
             SessionView(
                 "session",
                 4,
@@ -300,7 +263,7 @@ class TerminalPermissionUiTests(unittest.TestCase):
             def list_models(self):
                 return ["gpt-test"]
 
-        controller = ApplicationCoordinator(
+        coordinator = ApplicationCoordinator(
             Config("key"),
             provider=Provider(),
             session=Session.create(in_memory=True),
@@ -312,23 +275,23 @@ class TerminalPermissionUiTests(unittest.TestCase):
         )
 
         with create_pipe_input() as input:
-            ui = TerminalChatUi(controller, input=input, output=DummyOutput())
-            ui.input_area.text = "draft prompt"
+            ui = TerminalChatUi(coordinator, input=input, output=DummyOutput())
+            ui.bottom_area.input_panel.editor.text = "draft prompt"
 
             async def approve() -> bool:
                 pending = asyncio.create_task(
-                    controller.request_tool_permission(lifecycle)
+                    coordinator.request_tool_permission(lifecycle)
                 )
                 await asyncio.sleep(0)
 
-                self.assertEqual(ui.input_area.text, "draft prompt")
+                self.assertEqual(ui.bottom_area.input_panel.editor.text, "draft prompt")
                 self.assertIs(
                     ui.app.layout.current_control,
-                    ui.permission_deny_button.control,
+                    ui.bottom_area.permission_panel.deny_button.control,
                 )
-                self.assertTrue(ui.permission_container.filter())
-                self.assertFalse(ui.input_container.filter())
-                preview = ui._render_permission_request()
+                self.assertTrue(ui.bottom_area._permission_container.filter())
+                self.assertFalse(ui.bottom_area._input_container.filter())
+                preview = ui.bottom_area.permission_panel.render_request()
                 self.assertIn("file_writer", preview)
                 self.assertIn("characters omitted", preview)
                 self.assertLess(
@@ -336,19 +299,19 @@ class TerminalPermissionUiTests(unittest.TestCase):
                     MAX_PERMISSION_PREVIEW_CHARS + 200,
                 )
 
-                ui.permission_allow_button.handler()
+                ui.bottom_area.permission_panel.allow_button.handler()
                 return await pending
 
             self.assertTrue(asyncio.run(approve()))
-            self.assertEqual(ui.input_area.text, "draft prompt")
+            self.assertEqual(ui.bottom_area.input_panel.editor.text, "draft prompt")
             self.assertIs(
                 ui.app.layout.current_control,
-                ui.input_area.control,
+                ui.bottom_area.input_panel.editor.control,
             )
-            self.assertFalse(ui.permission_container.filter())
-            self.assertTrue(ui.input_container.filter())
+            self.assertFalse(ui.bottom_area._permission_container.filter())
+            self.assertTrue(ui.bottom_area._input_container.filter())
             ui._event_subscription.unsubscribe()
-        controller.session.close()
+        coordinator.session.close()
 
 
 if __name__ == "__main__":

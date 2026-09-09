@@ -14,8 +14,7 @@ from alpha_forge.config import (
     build_config,
     default_user_config_path,
 )
-from alpha_forge.sessions import DEFAULT_SYSTEM_PROMPT
-from alpha_forge.terminal_ui import TerminalChatUi
+from alpha_forge.ui.terminal import TerminalChatUi
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,24 +43,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_repl(config: Config, *, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> int:
+def run_repl(config: Config) -> int:
     """Sync entry point. Wraps :func:`run_repl_async` with ``asyncio.run``."""
-    return asyncio.run(run_repl_async(config, system_prompt=system_prompt))
+    return asyncio.run(run_repl_async(config))
 
 
-async def run_repl_async(
-    config: Config, *, system_prompt: str = DEFAULT_SYSTEM_PROMPT
-) -> int:
+async def run_repl_async(config: Config) -> int:
     """Run the full-screen prompt-toolkit chat UI."""
-    controller = ApplicationCoordinator(config, system_prompt=system_prompt)
-    ui = TerminalChatUi(controller)
-    consumer_task = asyncio.create_task(controller.consume())
+    coordinator = ApplicationCoordinator(config)
+    ui = TerminalChatUi(coordinator)
+    consumer_task = asyncio.create_task(coordinator.consume())
     try:
         return await ui.run_async()
     finally:
         # The UI can stop on EOF or an exception without requesting shutdown.
         # Ensure the consumer can finish before waiting for it.
-        controller.request_exit()
+        coordinator.request_exit()
         await consumer_task
 
 

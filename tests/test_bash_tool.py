@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from alpha_forge.context import ContextPipeline, ToolResultBudgetPolicy
 from alpha_forge.providers import ProviderOutput, ToolCall
 from alpha_forge.sessions import Session
+from alpha_forge.sessions.tool_result_reader import ToolResultReader
 from alpha_forge.tools import (
     DEFAULT_BASH_TIMEOUT_SECONDS,
     MAX_BASH_TIMEOUT_SECONDS,
@@ -218,7 +219,7 @@ class BashToolTests(unittest.TestCase):
             )
         )
 
-        read_result = session.read_tool_result(
+        read_result = ToolResultReader(session.transcript).read(
             raw.event_id,
             offset=stdout_offset,
             limit=25,

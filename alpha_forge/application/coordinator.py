@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -14,20 +13,14 @@ from alpha_forge.application.events import (
     ExitRequested,
     InputQueued,
     InputStarted,
-    ModelOutputRecorded,
     PersistenceFailed,
-    ProviderDeltaReceived,
-    ProviderRequestStarted,
-    ProviderResponseCompleted,
     RequestFailed,
     SessionView,
-    SessionViewChanged,
     StatusChanged,
-    ToolPermissionRequested,
-    ToolPermissionResolved,
-    ToolResultRecorded,
-    ToolStarted,
 )
+from alpha_forge.application.permissions import PermissionBroker
+from alpha_forge.application.query_runner import QueryRunner
+from alpha_forge.application.views import publish_session_view, session_view
 from alpha_forge.config import Config
 from alpha_forge.context.pipeline import ContextPipeline
 from alpha_forge.context.tool_result_budget import ToolResultBudgetPolicy
@@ -43,26 +36,13 @@ from alpha_forge.projectors.session_state import OpenQuery
 from alpha_forge.providers.base import ModelProvider
 from alpha_forge.providers.openai_chat import OpenAIChatAdapter
 from alpha_forge.query import (
-    CommitModelOutput,
-    CommitToolResult,
-    ContextPrepared,
-    ModelOutputCommitted,
-    PendingIntermediateRound,
-    PrepareContext,
-    QueryCompleted,
-    QueryEffect,
     QueryEngine,
     QueryExecutionError,
-    QueryRequest,
-    ToolExecutionStarted,
-    ToolResultCommitted,
 )
-from alpha_forge.sessions import DEFAULT_SYSTEM_PROMPT, Session
+from alpha_forge.sessions import Session
 from alpha_forge.slash_commands import SlashCommandHandler
 from alpha_forge.slash_commands.base import CommandContext, CommandOutcome
 from alpha_forge.tools import (
-    ToolExecutor,
-    ToolNotFoundError,
     ToolRegistry,
     load_builtin_tools,
 )
@@ -110,38 +90,39 @@ class ApplicationCoordinator:
         self,
         config: Config,
         *,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         provider: ModelProvider | None = None,
-        command_handler: SlashCommandHandler | None = None,
         tool_registry: ToolRegistry | None = None,
         session: Session | None = None,
         context_pipeline: ContextPipeline | None = None,
-        query: QueryEngine | None = None,
-        hooks: HookRegistry | None = None,
+        query_engine: QueryEngine | None = None,
+        hook_registry: HookRegistry | None = None,
     ) -> None:
         self.config = config
         self.provider = provider or OpenAIChatAdapter(config)
-        self.command_handler = command_handler or SlashCommandHandler()
-        self.tool_registry = tool_registry or load_builtin_tools()
-        self.session = session or Session.create(system_prompt=system_prompt)
-        self.context_pipeline = context_pipeline or ContextPipeline(
-            (ToolResultBudgetPolicy(),)
-        )
-        self.query = query or QueryEngine(self.provider)
-        self.events = EventRouter()
-        self.hooks = hooks or HookRegistry()
-        self.hooks.register(
+        self.command_handler = SlashCommandHandler()
+        self.session = session or Session.create()
+        self.event_router = EventRouter()
+        self._permission_broker = PermissionBroker(self.event_router)
+        self.hook_registry = hook_registry or HookRegistry()
+        self.hook_registry.register(
             Hook(
                 match_tool_names(*DEFAULT_PERMISSION_TOOLS),
                 PermissionAction(self.request_tool_permission),
             )
         )
-        self.queue: asyncio.Queue[QueueItem] = asyncio.Queue()
-        self._recovery: deque[RecoveryInput] = deque()
+        self._query_runner = QueryRunner(
+            query_engine=query_engine or QueryEngine(self.provider),
+            context_pipeline=context_pipeline
+            or ContextPipeline((ToolResultBudgetPolicy(),)),
+            tool_registry=tool_registry or load_builtin_tools(),
+            hook_registry=self.hook_registry,
+            event_router=self.event_router,
+        )
+        self._input_queue: asyncio.Queue[QueueItem] = asyncio.Queue()
+        self._recovery_inputs: deque[RecoveryInput] = deque()
         self._accepting = True
         self._shutdown_enqueued = False
         self._persistence_halted = False
-        self._pending_permission: tuple[str, asyncio.Future[bool]] | None = None
         self._schedule_recovery(self.session)
 
     @property
@@ -149,83 +130,60 @@ class ApplicationCoordinator:
         return self._accepting
 
     @property
-    def initial_view(self) -> SessionView:
-        return self._session_view()
+    def session_view(self) -> SessionView:
+        return session_view(self.session)
 
     def submit(self, user_input: str) -> None:
         if not self._accepting or not user_input.strip():
             return
         item = self._parse_input(user_input)
-        self.queue.put_nowait(item)
+        self._input_queue.put_nowait(item)
         raw = item.raw if isinstance(item, CommandInput) else item.content
-        self.events.publish(InputQueued(item.item_id, raw))
+        self.event_router.publish(InputQueued(item.item_id, raw))
         if isinstance(item, CommandInput) and (
             item.raw.strip().split(maxsplit=1)[0] in ("/exit", "/quit")
         ):
             self._accepting = False
-            self.events.publish(ExitRequested())
+            self.event_router.publish(ExitRequested())
 
     def request_exit(self) -> None:
         if self._shutdown_enqueued:
             return
         self._accepting = False
-        if self._pending_permission is not None:
-            request_id, _future = self._pending_permission
-            self.resolve_tool_permission(request_id, False)
+        self._permission_broker.deny_pending()
         self._shutdown_enqueued = True
         item = ShutdownInput(uuid4().hex)
-        self.queue.put_nowait(item)
-        self.events.publish(ExitRequested())
+        self._input_queue.put_nowait(item)
+        self.event_router.publish(ExitRequested())
 
     async def request_tool_permission(self, event: PreToolExecution) -> bool:
-        """Publish one ephemeral approval request and await its resolution."""
-
-        if self._pending_permission is not None:
-            raise RuntimeError("another tool permission request is already pending")
-        request_id = uuid4().hex
-        future = asyncio.get_running_loop().create_future()
-        self._pending_permission = (request_id, future)
-        self.events.publish(ToolPermissionRequested(request_id, event))
-        try:
-            return await future
-        finally:
-            if self._pending_permission is not None:
-                pending_id, _pending_future = self._pending_permission
-                if pending_id == request_id:
-                    self._pending_permission = None
+        """Publish an ephemeral approval request and await its resolution."""
+        return await self._permission_broker.request(event)
 
     def resolve_tool_permission(self, request_id: str, allowed: bool) -> bool:
-        """Resolve the current approval request exactly once."""
-
-        if self._pending_permission is None:
-            return False
-        pending_id, future = self._pending_permission
-        if pending_id != request_id or future.done():
-            return False
-        future.set_result(allowed)
-        self.events.publish(ToolPermissionResolved(request_id, allowed))
-        return True
+        """Resolve the matching pending approval exactly once."""
+        return self._permission_broker.resolve(request_id, allowed)
 
     async def consume(self) -> None:
         try:
             while True:
-                from_queue = not self._recovery
+                from_input_queue = not self._recovery_inputs
                 item: QueueItem | RecoveryInput
-                if self._recovery:
-                    item = self._recovery.popleft()
+                if self._recovery_inputs:
+                    item = self._recovery_inputs.popleft()
                 else:
-                    item = await self.queue.get()
+                    item = await self._input_queue.get()
                 try:
-                    self.events.publish(InputStarted(item.item_id))
+                    self.event_router.publish(InputStarted(item.item_id))
                     if isinstance(item, ShutdownInput):
                         self._shutdown_enqueued = True
-                        self.events.publish(ExitReady())
+                        self.event_router.publish(ExitReady())
                         return
                     if self._persistence_halted:
                         if isinstance(item, CommandInput) and item.raw.strip().split(
                             maxsplit=1
                         )[0] in ("/exit", "/quit"):
-                            self.events.publish(ExitReady())
+                            self.event_router.publish(ExitReady())
                             return
                         continue
                     if isinstance(item, RecoveryInput):
@@ -236,11 +194,11 @@ class ApplicationCoordinator:
                         continue
                     if await self._handle_command(item.raw):
                         self._shutdown_enqueued = True
-                        self.events.publish(ExitReady())
+                        self.event_router.publish(ExitReady())
                         return
                 finally:
-                    if from_queue:
-                        self.queue.task_done()
+                    if from_input_queue:
+                        self._input_queue.task_done()
         finally:
             self.session.close()
 
@@ -262,36 +220,9 @@ class ApplicationCoordinator:
         await self._run_query(continuation)
 
     async def _run_query(self, continuation: OpenQuery) -> None:
-        registry = self._query_registry(self.session)
-        request = QueryRequest(
-            prompt_event_id=continuation.prompt_event_id,
-            pending_intermediate_round=(
-                PendingIntermediateRound(
-                    continuation.pending_intermediate_round.model_output_event_id,
-                    continuation.pending_intermediate_round.missing_calls,
-                )
-                if continuation.pending_intermediate_round is not None
-                else None
-            ),
-            completed_intermediate_rounds=(
-                continuation.completed_intermediate_rounds
-            ),
-            tool_specs=registry.specs(),
-            tool_executor=ToolExecutor(registry, self.hooks),
-        )
-        feedback = None
+        request = self._query_runner.prepare_request(self.session, continuation)
         try:
-            async with aclosing(self.query.run(request)) as query_events:
-                while True:
-                    try:
-                        event = await query_events.asend(feedback)
-                    except StopAsyncIteration:
-                        break
-                    feedback = None
-                    if isinstance(event, QueryEffect):
-                        feedback = self._handle_query_effect(event)
-                    else:
-                        self._publish_query_progress(event)
+            await self._query_runner.run(self.session, request)
         except TranscriptPersistenceError as exc:
             self._halt_for_persistence_failure("query", exc)
         except QueryExecutionError as exc:
@@ -306,62 +237,6 @@ class ApplicationCoordinator:
                 stage="internal",
                 message=str(exc) or type(exc).__name__,
             )
-
-    def _handle_query_effect(self, effect: QueryEffect):
-        if isinstance(effect, PrepareContext):
-            before = self.session.revision
-            try:
-                snapshot = self.session.prepare_context(self.context_pipeline)
-            except TranscriptPersistenceError:
-                raise
-            except Exception as exc:
-                raise QueryExecutionError(
-                    "context",
-                    str(exc) or type(exc).__name__,
-                ) from exc
-            if self.session.revision != before:
-                self._publish_view()
-            return ContextPrepared(snapshot)
-        if isinstance(effect, CommitModelOutput):
-            record = self.session.record_model_output(
-                effect.prompt_event_id,
-                effect.output,
-            )
-            self._publish_view(reset_active=True)
-            self.events.publish(ModelOutputRecorded(record.event_id))
-            return ModelOutputCommitted(record.event_id, self.session.revision)
-        if isinstance(effect, CommitToolResult):
-            record = self.session.record_tool_result(
-                model_output_event_id=effect.model_output_event_id,
-                call_id=effect.call_id,
-                status=effect.status,
-                content=effect.content,
-            )
-            self._publish_view(reset_active=True)
-            self.events.publish(
-                ToolResultRecorded(
-                    record.event_id,
-                    effect.model_output_event_id,
-                    effect.call_id,
-                )
-            )
-            return ToolResultCommitted(record.event_id, self.session.revision)
-        raise QueryExecutionError(
-            "internal",
-            f"unsupported query effect: {type(effect).__name__}",
-        )
-
-    def _publish_query_progress(self, event: object) -> None:
-        if isinstance(event, ProviderRequestStarted):
-            self.events.publish(event)
-        elif isinstance(event, ProviderDeltaReceived):
-            self.events.publish(event)
-        elif isinstance(event, ProviderResponseCompleted):
-            self.events.publish(event)
-        elif isinstance(event, ToolExecutionStarted):
-            self.events.publish(ToolStarted(event.model_output_event_id, event.call))
-        elif isinstance(event, QueryCompleted):
-            self.events.publish(StatusChanged("Ready"))
 
     async def _handle_command(self, text: str) -> bool:
         source = self.session
@@ -417,7 +292,7 @@ class ApplicationCoordinator:
                 source.close()
 
         if outcome.status == "error" and outcome.messages:
-            self.events.publish(StatusChanged(outcome.messages[-1].content))
+            self.event_router.publish(StatusChanged(outcome.messages[-1].content))
         return outcome.action == "exit" and outcome.status == "success"
 
     def _switch_session(
@@ -459,14 +334,6 @@ class ApplicationCoordinator:
         self._publish_view(reset_active=True)
         return outcome
 
-    def _query_registry(self, session: Session) -> ToolRegistry:
-        registry = self.tool_registry.copy()
-        try:
-            registry.get("tool_result_reader")
-        except ToolNotFoundError:
-            registry.register(session.tool_result_reader())
-        return registry
-
     def _record_request_failure(
         self,
         *,
@@ -485,7 +352,7 @@ class ApplicationCoordinator:
             except Exception as exc:
                 self._halt_for_persistence_failure("request failure", exc)
                 return
-        self.events.publish(RequestFailed(message))
+        self.event_router.publish(RequestFailed(message))
 
     def _halt_for_persistence_failure(
         self,
@@ -495,22 +362,15 @@ class ApplicationCoordinator:
         self._accepting = False
         self._persistence_halted = True
         message = str(error) or type(error).__name__
-        self.events.publish(PersistenceFailed(stage, message))
+        self.event_router.publish(PersistenceFailed(stage, message))
 
     def _schedule_recovery(self, session: Session) -> None:
         continuation = session.open_query()
         if continuation is not None:
-            self._recovery.append(RecoveryInput(uuid4().hex, continuation))
-
-    def _session_view(self) -> SessionView:
-        return SessionView(
-            self.session.session_id,
-            self.session.revision,
-            self.session.ui_history(),
-        )
+            self._recovery_inputs.append(RecoveryInput(uuid4().hex, continuation))
 
     def _publish_view(self, *, reset_active: bool = False) -> None:
-        self.events.publish(SessionViewChanged(self._session_view(), reset_active))
+        publish_session_view(self.event_router, self.session, reset_active=reset_active)
 
     @staticmethod
     def _parse_input(raw: str) -> UserInput:

@@ -21,12 +21,65 @@ for each consumer.
 - `tools` owns provider-neutral tool specifications, lookup, and execution.
 - `sessions` is the application transcript-write boundary. It exposes
   commands and projections, not a mutable message list.
-- `application` owns the FIFO and coordinates session, commands, context,
-  query, tools, and reactive presentation events.
-- `ui_state` reduces durable session views plus ephemeral streaming progress.
+- `application` coordinates the FIFO, session switching, query execution,
+  tool permissions, and reactive presentation events through dedicated services.
+- `ui` owns terminal presentation. History, input, and permission components
+  each own their state and widgets; the terminal shell composes them.
 
 The dependency direction is toward small value and protocol modules. The query
 engine has no transcript, session, command, coordinator, or UI reference.
+
+## Application and terminal components
+
+Start with `cli.run_repl_async`: it creates an `ApplicationCoordinator` and a
+`TerminalChatUi`, then runs the FIFO consumer alongside the terminal application.
+
+| Component | Owns | Collaborates through |
+| --- | --- | --- |
+| `ApplicationCoordinator` | Input acceptance, FIFO, recovery priority, slash commands, session switching, failure handling, shutdown | `Session`, `QueryRunner`, `PermissionBroker`, application events |
+| `QueryRunner` | Session-specific query requests, effect/feedback iteration, context preparation, durable effects, progress publication | An explicit session for each request/run; no retained current session |
+| `PermissionBroker` | One pending approval future and resolution exactly once | Application permission events and the coordinator's request/resolve methods |
+| `Session` | Transcript commands, projections, creation, resume, and closing | Transcript storage and projectors |
+| `ToolResultReader` | Raw-result paging and its tool definition | The transcript selected for the current query |
+| `TerminalChatUi` | Application lifetime, styles, global actions, status-bar formatting, coordinator integration | History and bottom-area interfaces |
+| `HistoryArea` | Conversation region and navigation | History control/state and upward change notifications |
+| `BottomArea` | Queue, input/permission visibility, status, focus routing | Child widget interfaces and upward action/change hooks |
+
+The terminal shell composes a fixed status bar and two major areas. It forwards
+application events to the areas and reacts to their change notifications with
+redraw requests. Only the terminal subscribes to or invokes the coordinator.
+Children communicate with their immediate parent through hooks.
+
+The bottom area owns the visibility relationship between permissions and the
+input panel. Suggestions are part of the input panel; queued inputs are a
+separate widget. Status is computed in the bottom area and exposed to the top
+bar through a read-only property. The terminal does not inspect grandchildren.
+
+See [the UI architecture guide](ui-architecture.md) for the widget protocol,
+state ownership, focus and keyboard behavior, and examples of how updates and
+actions travel through the layers.
+
+Committed history comes from `SessionView`; provider deltas and running tools
+remain ephemeral. `HistoryState` invalidates its committed-line cache on every
+new view, including a different session with the same revision. The history
+control wraps those lines for the viewport, while clipboard copying uses only
+unwrapped committed transcript text. UI tool-result previews retain the final
+20 lines and do not alter model context or stored results.
+
+A query runner receives the selected session explicitly. Its tool registry is a
+copy with a `ToolResultReader` bound to that session's transcript, unless a caller
+already supplied a tool with that name. Model-output and tool-result effects
+append through `Session`, publish the committed view and acknowledgment event,
+then return feedback to the query engine. Context preparation publishes a new
+view only when a policy commits an edit. The coordinator handles failures and
+owns session lifetime.
+This keeps `/clear` and `/resume` from leaving a reader or query attached to the
+previous session.
+
+The coordinator always installs the default permission hook for `bash` and
+`file_writer`, including when constructed programmatically. Additional hooks
+can be registered through `coordinator.hook_registry`; callers must resolve approval
+requests when executing a tool covered by the default hook.
 
 ## Record envelope
 
