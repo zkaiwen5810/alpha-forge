@@ -4,6 +4,8 @@ Alpha Forge is a terminal AI agent built on the OpenAI Python SDK. Chat with it
 to explore a codebase, edit files, run commands, and work through tasks across
 saved conversations.
 
+![Alpha Forge terminal showing tool calls, token usage, and a file-write approval prompt](static/ui_screenshot_v2.png)
+
 ## Core features
 
 ### Interactive terminal
