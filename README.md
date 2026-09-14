@@ -36,9 +36,12 @@ saved conversations.
 - **Saved conversations:** Automatically persist accepted inputs, completed
   model outputs, and tool results in local JSONL transcripts under
   `~/.local/share/alpha-forge/transcripts/` (honoring `$XDG_DATA_HOME`).
-- **Resume or start fresh:** Use `/resume PATH` to continue a saved transcript
-  or `/clear` to start a new conversation. Recovery marks unfinished tool calls
-  as interrupted instead of rerunning potentially completed actions.
+- **Resume or start fresh:** Use `/resume PATH` to restore a saved conversation
+  or `/clear` to start a new one. Resume marks unfinished work as interrupted
+  and waits for your next message; it makes no model requests or tool calls.
+  Send a message such as “continue” to start a fresh query with the saved context.
+  Missing tool results have unknown execution outcomes, since actions may have
+  happened before their results were saved.
 - **Bounded tool output:** Large results become compact previews in the model's
   context while the full results remain stored. The agent can retrieve more
   through the built-in `tool_result_reader` tool.

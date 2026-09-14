@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -32,7 +31,6 @@ from alpha_forge.hooks import (
     PreToolExecution,
     match_tool_names,
 )
-from alpha_forge.projectors.session_state import OpenQuery
 from alpha_forge.providers.base import ModelProvider
 from alpha_forge.providers.openai_chat import OpenAIChatAdapter
 from alpha_forge.query import (
@@ -64,12 +62,6 @@ class PromptInput:
 class CommandInput:
     item_id: str
     raw: str
-
-
-@dataclass(frozen=True, slots=True)
-class RecoveryInput:
-    item_id: str
-    continuation: OpenQuery
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,11 +111,9 @@ class ApplicationCoordinator:
             event_router=self.event_router,
         )
         self._input_queue: asyncio.Queue[QueueItem] = asyncio.Queue()
-        self._recovery_inputs: deque[RecoveryInput] = deque()
         self._accepting = True
         self._shutdown_enqueued = False
         self._persistence_halted = False
-        self._schedule_recovery(self.session)
 
     @property
     def accepting(self) -> bool:
@@ -166,13 +156,16 @@ class ApplicationCoordinator:
 
     async def consume(self) -> None:
         try:
+            revision = self.session.revision
+            try:
+                self.session.interrupt_open_query()
+            except Exception as exc:  # noqa: BLE001
+                self._halt_for_persistence_failure("session activation", exc)
+            finally:
+                if self.session.revision != revision:
+                    self._publish_view(reset_active=True)
             while True:
-                from_input_queue = not self._recovery_inputs
-                item: QueueItem | RecoveryInput
-                if self._recovery_inputs:
-                    item = self._recovery_inputs.popleft()
-                else:
-                    item = await self._input_queue.get()
+                item = await self._input_queue.get()
                 try:
                     self.event_router.publish(InputStarted(item.item_id))
                     if isinstance(item, ShutdownInput):
@@ -186,9 +179,6 @@ class ApplicationCoordinator:
                             self.event_router.publish(ExitReady())
                             return
                         continue
-                    if isinstance(item, RecoveryInput):
-                        await self._run_query(item.continuation)
-                        continue
                     if isinstance(item, PromptInput):
                         await self._handle_prompt(item.content)
                         continue
@@ -197,43 +187,34 @@ class ApplicationCoordinator:
                         self.event_router.publish(ExitReady())
                         return
                 finally:
-                    if from_input_queue:
-                        self._input_queue.task_done()
+                    self._input_queue.task_done()
         finally:
             self.session.close()
 
     async def _handle_prompt(self, content: str) -> None:
         try:
-            self.session.accept_prompt(content)
-        except Exception as exc:
+            prompt = self.session.accept_prompt(content)
+        except Exception as exc:  # noqa: BLE001
             self._halt_for_persistence_failure("user input", exc)
             return
         self._publish_view()
-        continuation = self.session.open_query()
-        if continuation is None:
-            self._record_request_failure(
-                prompt_event_id=None,
-                stage="internal",
-                message="accepted prompt did not create an open query",
-            )
-            return
-        await self._run_query(continuation)
+        await self._run_query(prompt.event_id)
 
-    async def _run_query(self, continuation: OpenQuery) -> None:
-        request = self._query_runner.prepare_request(self.session, continuation)
+    async def _run_query(self, prompt_event_id: str) -> None:
         try:
+            request = self._query_runner.prepare_request(self.session, prompt_event_id)
             await self._query_runner.run(self.session, request)
         except TranscriptPersistenceError as exc:
             self._halt_for_persistence_failure("query", exc)
         except QueryExecutionError as exc:
             self._record_request_failure(
-                prompt_event_id=continuation.prompt_event_id,
+                prompt_event_id=prompt_event_id,
                 stage=exc.stage,
                 message=str(exc),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self._record_request_failure(
-                prompt_event_id=continuation.prompt_event_id,
+                prompt_event_id=prompt_event_id,
                 stage="internal",
                 message=str(exc) or type(exc).__name__,
             )
@@ -247,7 +228,7 @@ class ApplicationCoordinator:
                 name=parsed.name,
                 arguments=parsed.arguments,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self._halt_for_persistence_failure("command", exc)
             return False
         self._publish_view()
@@ -261,7 +242,7 @@ class ApplicationCoordinator:
                     model_catalog=self.provider,
                 ),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             outcome = CommandOutcome(
                 status="error",
                 messages=(CommandMessage(f"command failed: {exc}", "error"),),
@@ -281,7 +262,7 @@ class ApplicationCoordinator:
                 status=outcome.status,
                 messages=outcome.messages,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self._halt_for_persistence_failure("command result", exc)
             if self.session is not source:
                 source.close()
@@ -311,6 +292,7 @@ class ApplicationCoordinator:
             else:
                 destination = Session.resume(Path(resume_path))
                 kind = "resume"
+            destination.interrupt_open_query()
             destination.link(
                 kind=kind,
                 source_session_id=source.session_id,
@@ -330,7 +312,6 @@ class ApplicationCoordinator:
             )
 
         self.session = destination
-        self._schedule_recovery(destination)
         self._publish_view(reset_active=True)
         return outcome
 
@@ -349,7 +330,7 @@ class ApplicationCoordinator:
                     message=message,
                 )
                 self._publish_view(reset_active=True)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 self._halt_for_persistence_failure("request failure", exc)
                 return
         self.event_router.publish(RequestFailed(message))
@@ -363,11 +344,6 @@ class ApplicationCoordinator:
         self._persistence_halted = True
         message = str(error) or type(error).__name__
         self.event_router.publish(PersistenceFailed(stage, message))
-
-    def _schedule_recovery(self, session: Session) -> None:
-        continuation = session.open_query()
-        if continuation is not None:
-            self._recovery_inputs.append(RecoveryInput(uuid4().hex, continuation))
 
     def _publish_view(self, *, reset_active: bool = False) -> None:
         publish_session_view(self.event_router, self.session, reset_active=reset_active)
@@ -384,6 +360,5 @@ __all__ = [
     "ApplicationCoordinator",
     "CommandInput",
     "PromptInput",
-    "RecoveryInput",
     "ShutdownInput",
 ]

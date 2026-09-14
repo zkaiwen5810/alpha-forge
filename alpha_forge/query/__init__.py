@@ -1,7 +1,6 @@
 """Public query-engine contracts."""
 
 from alpha_forge.query.engine import (
-    INTERRUPTED_TOOL_RESULT,
     MAX_INTERMEDIATE_ROUNDS,
     QueryEngine,
 )
@@ -11,7 +10,6 @@ from alpha_forge.query.protocol import (
     CommitToolResult,
     ContextPrepared,
     ModelOutputCommitted,
-    PendingIntermediateRound,
     PrepareContext,
     ProviderDeltaReceived,
     ProviderRequestStarted,
@@ -29,14 +27,12 @@ from alpha_forge.query.protocol import (
 )
 
 __all__ = [
-    "INTERRUPTED_TOOL_RESULT",
     "MAX_INTERMEDIATE_ROUNDS",
     "CommitModelOutput",
     "CommitToolResult",
     "CommittedToolResultStatus",
     "ContextPrepared",
     "ModelOutputCommitted",
-    "PendingIntermediateRound",
     "PrepareContext",
     "ProviderDeltaReceived",
     "ProviderRequestStarted",

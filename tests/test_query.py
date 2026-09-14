@@ -22,8 +22,9 @@ from alpha_forge.providers import (
     TextDelta,
     ToolCall,
 )
-from alpha_forge.query import INTERRUPTED_TOOL_RESULT, QueryEngine
+from alpha_forge.query import QueryEngine
 from alpha_forge.sessions import Session
+from alpha_forge.sessions.service import INTERRUPTED_TOOL_RESULT
 from alpha_forge.tools import Tool, ToolRegistry
 from alpha_forge.transcript import ContextEdited, QueryFailed, ToolResult
 
@@ -185,7 +186,7 @@ class QueryFlowTests(unittest.TestCase):
             any(isinstance(event, ContextEdited) for event in session.transcript.events)
         )
 
-    def test_recovery_synthesizes_missing_results_at_continuation(self) -> None:
+    def test_activation_interrupts_without_calling_provider_or_tools(self) -> None:
         session = Session.create(in_memory=True)
         prompt = session.accept_prompt("recover")
         output = session.record_model_output(
@@ -204,22 +205,21 @@ class QueryFlowTests(unittest.TestCase):
             content="already durable",
         )
         revision_before_open = session.revision
-        continuation = session.open_query()
-        self.assertEqual(session.revision, revision_before_open)
-        self.assertEqual(
-            [
-                call.call_id
-                for call in continuation.pending_intermediate_round.missing_calls
-            ],
-            ["missing"],
-        )
-
-        provider = ScriptedProvider([_text("continued")])
+        invoked = []
+        provider = ScriptedProvider([])
+        registry = ToolRegistry([
+            Tool(
+                name="echo",
+                description="echo",
+                input_schema={"type": "object"},
+                handler=lambda args: invoked.append(args) or "done",
+            ),
+        ])
         coordinator = ApplicationCoordinator(
             Config("key"),
             provider=provider,
             session=session,
-            tool_registry=ToolRegistry(),
+            tool_registry=registry,
             context_pipeline=ContextPipeline(),
         )
         self.assertEqual(session.revision, revision_before_open)
@@ -236,7 +236,57 @@ class QueryFlowTests(unittest.TestCase):
             [("recorded", "success"), ("missing", "interrupted")],
         )
         self.assertEqual(results[-1].content, INTERRUPTED_TOOL_RESULT)
-        self.assertEqual(len(provider.contexts), 1)
+        self.assertEqual(provider.contexts, [])
+        self.assertEqual(invoked, [])
+        self.assertIsInstance(session.transcript.events[-1], QueryFailed)
+        self.assertEqual(session.transcript.events[-1].stage, "interrupted")
+        self.assertIsNone(session.transcript.state.active_prompt_event_id)
+
+    def test_new_prompt_after_activation_gets_fresh_round_budget(self) -> None:
+        session = Session.create(in_memory=True)
+        prompt = session.accept_prompt("old request")
+        for index in range(2):
+            output = session.record_model_output(
+                prompt.event_id,
+                ProviderOutput((ToolCall(str(index), "echo", "{}"),)),
+            )
+            session.record_tool_result(
+                model_output_event_id=output.event_id,
+                call_id=str(index),
+                status="success",
+                content="saved",
+            )
+        provider = ScriptedProvider([
+            ProviderOutput((ToolCall("new", "echo", "{}"),)),
+            _text("done"),
+        ])
+        invoked = []
+        registry = ToolRegistry([
+            Tool(
+                name="echo",
+                description="echo",
+                input_schema={"type": "object"},
+                handler=lambda args: invoked.append(args) or "new result",
+            ),
+        ])
+        coordinator = ApplicationCoordinator(
+            Config("key"),
+            provider=provider,
+            session=session,
+            tool_registry=registry,
+            query_engine=QueryEngine(provider, max_intermediate_rounds=2),
+        )
+        asyncio.run(_consume_one(coordinator, "continue"))
+        self.assertEqual(len(provider.contexts), 2)
+        self.assertEqual(invoked, [{}])
+        self.assertEqual(
+            [item.content for item in provider.contexts[0].items
+             if isinstance(item, ToolResultContext)],
+            ["saved", "saved"],
+        )
+        self.assertEqual(session.transcript.events[-1].items, _text("done").items)
+        failures = [e for e in session.transcript.events if isinstance(e, QueryFailed)]
+        self.assertEqual([e.stage for e in failures], ["interrupted"])
 
     def test_provider_failure_is_durable_and_discards_stream_draft(self) -> None:
         provider = ScriptedProvider([RuntimeError("network down")])
@@ -253,7 +303,7 @@ class QueryFlowTests(unittest.TestCase):
         self.assertIsInstance(failure, QueryFailed)
         self.assertEqual(failure.stage, "provider")
         self.assertEqual(failure.message, "network down")
-        self.assertIsNone(session.open_query())
+        self.assertIsNone(session.transcript.state.active_prompt_event_id)
 
     def test_context_edit_is_committed_before_the_next_provider_request(self) -> None:
         provider = ScriptedProvider(

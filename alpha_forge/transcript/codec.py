@@ -211,6 +211,7 @@ def _decode_event(event_type: str, payload: dict[str, Any]) -> TranscriptEvent:
     if event_type == "query.failed":
         stage = _str(payload, "stage")
         if stage not in (
+            "interrupted",
             "context",
             "provider",
             "intermediate_round_limit",

@@ -193,7 +193,7 @@ class SessionAndCoordinatorTests(unittest.TestCase):
 
             resumed = Session.resume(path)
             self.assertEqual(resumed.revision, 3)
-            self.assertIsNone(resumed.open_query())
+            self.assertIsNone(resumed.transcript.state.active_prompt_event_id)
             resumed.close()
 
     def test_session_tool_result_reader_pages_raw_content(self) -> None:

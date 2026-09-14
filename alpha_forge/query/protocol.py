@@ -19,18 +19,10 @@ type CommittedToolResultStatus = Literal["success", "error", "interrupted"]
 
 
 @dataclass(frozen=True, slots=True)
-class PendingIntermediateRound:
-    model_output_event_id: str
-    missing_calls: tuple[ToolCall, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class QueryRequest:
-    """Everything needed to continue one already-accepted prompt."""
+    """Everything needed to execute one newly accepted prompt."""
 
     prompt_event_id: str
-    pending_intermediate_round: PendingIntermediateRound | None
-    completed_intermediate_rounds: int
     tool_specs: tuple[ToolSpec, ...]
     tool_executor: ToolCallExecutor
 
@@ -146,7 +138,6 @@ __all__ = [
     "CommittedToolResultStatus",
     "ContextPrepared",
     "ModelOutputCommitted",
-    "PendingIntermediateRound",
     "PrepareContext",
     "ProviderDeltaReceived",
     "ProviderRequestStarted",

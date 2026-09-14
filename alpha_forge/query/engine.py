@@ -26,9 +26,6 @@ from alpha_forge.query.protocol import (
 )
 
 MAX_INTERMEDIATE_ROUNDS = 10
-INTERRUPTED_TOOL_RESULT = (
-    "Tool execution was interrupted before a durable result was recorded."
-)
 
 
 class QueryEngine:
@@ -49,33 +46,7 @@ class QueryEngine:
         self,
         request: QueryRequest,
     ) -> AsyncGenerator[QueryStreamEvent, QueryFeedback | None]:
-        intermediate_rounds = request.completed_intermediate_rounds
-
-        pending = request.pending_intermediate_round
-        if pending is not None:
-            recovery_revision = 0
-            for call in pending.missing_calls:
-                feedback = yield CommitToolResult(
-                    pending.model_output_event_id,
-                    call.call_id,
-                    "interrupted",
-                    INTERRUPTED_TOOL_RESULT,
-                )
-                committed_result = _expect(
-                    feedback,
-                    ToolResultCommitted,
-                    "tool-result commit",
-                )
-                if (
-                    not committed_result.result_event_id
-                    or committed_result.revision <= recovery_revision
-                ):
-                    raise QueryExecutionError(
-                        "internal",
-                        "recovery commit feedback is not monotonic",
-                    )
-                recovery_revision = committed_result.revision
-            intermediate_rounds += 1
+        intermediate_rounds = 0
 
         while True:
             if intermediate_rounds >= self.max_intermediate_rounds:
@@ -157,7 +128,7 @@ class QueryEngine:
                 yield ToolExecutionStarted(output_event_id, call)
                 try:
                     result = await request.tool_executor.execute(call)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     result_status = "error"
                     result_content = f"error: {str(exc) or type(exc).__name__}"
                 else:
@@ -201,7 +172,6 @@ def _expect[FeedbackType: QueryFeedback](
 
 
 __all__ = [
-    "INTERRUPTED_TOOL_RESULT",
     "MAX_INTERMEDIATE_ROUNDS",
     "QueryEngine",
 ]

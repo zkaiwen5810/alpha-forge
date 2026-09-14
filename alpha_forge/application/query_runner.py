@@ -15,13 +15,11 @@ from alpha_forge.application.views import publish_session_view
 from alpha_forge.context.pipeline import ContextPipeline
 from alpha_forge.events import EventRouter
 from alpha_forge.hooks import HookRegistry
-from alpha_forge.projectors.session_state import OpenQuery
 from alpha_forge.query import (
     CommitModelOutput,
     CommitToolResult,
     ContextPrepared,
     ModelOutputCommitted,
-    PendingIntermediateRound,
     PrepareContext,
     QueryCompleted,
     QueryEffect,
@@ -54,20 +52,11 @@ class QueryRunner:
         self.event_router = event_router
 
     def prepare_request(
-        self, session: Session, continuation: OpenQuery
+        self, session: Session, prompt_event_id: str
     ) -> QueryRequest:
         registry = self._query_registry(session)
         return QueryRequest(
-            prompt_event_id=continuation.prompt_event_id,
-            pending_intermediate_round=(
-                PendingIntermediateRound(
-                    continuation.pending_intermediate_round.model_output_event_id,
-                    continuation.pending_intermediate_round.missing_calls,
-                )
-                if continuation.pending_intermediate_round is not None
-                else None
-            ),
-            completed_intermediate_rounds=(continuation.completed_intermediate_rounds),
+            prompt_event_id=prompt_event_id,
             tool_specs=registry.specs(),
             tool_executor=ToolExecutor(registry, self.hook_registry),
         )
@@ -133,11 +122,7 @@ class QueryRunner:
         )
 
     def _publish_query_progress(self, event: object) -> None:
-        if isinstance(event, ProviderRequestStarted):
-            self.event_router.publish(event)
-        elif isinstance(event, ProviderDeltaReceived):
-            self.event_router.publish(event)
-        elif isinstance(event, ProviderResponseCompleted):
+        if isinstance(event, (ProviderRequestStarted, ProviderDeltaReceived, ProviderResponseCompleted)):
             self.event_router.publish(event)
         elif isinstance(event, ToolExecutionStarted):
             self.event_router.publish(

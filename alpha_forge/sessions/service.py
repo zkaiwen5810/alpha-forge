@@ -7,10 +7,6 @@ from pathlib import Path
 from alpha_forge.context.models import ModelContextSnapshot
 from alpha_forge.context.pipeline import ContextPipeline
 from alpha_forge.projectors.model_context import ModelContextProjector
-from alpha_forge.projectors.session_state import (
-    OpenQuery,
-    SessionStateProjector,
-)
 from alpha_forge.projectors.ui_history import (
     UiHistoryItem,
     UiHistoryProjector,
@@ -32,8 +28,13 @@ from alpha_forge.transcript.events import (
 )
 from alpha_forge.transcript.records import TranscriptRecord
 from alpha_forge.transcript.store import TranscriptStore
+from alpha_forge.transcript.validation import tool_calls
 
 DEFAULT_SYSTEM_PROMPT = "You are Alpha Forge, a concise and helpful assistant."
+INTERRUPTED_TOOL_RESULT = (
+    "No durable tool result was recorded. Execution outcome is unknown; "
+    "the action may have happened before the session was interrupted."
+)
 
 
 class Session:
@@ -178,8 +179,33 @@ class Session:
             commit=self._commit,
         )
 
-    def open_query(self) -> OpenQuery | None:
-        return SessionStateProjector(self._transcript).open_query()
+    def interrupt_open_query(self) -> None:
+        """Close abandoned work on activation without executing tools or a model.
+
+        Each append is durable, so a later activation can finish this operation
+        after a crash without duplicating results or the terminal event.
+        """
+        state = self._transcript.state
+        prompt_id = state.active_prompt_event_id
+        if prompt_id is None:
+            return
+        output_ids = state.outputs_by_prompt.get(prompt_id, [])
+        if output_ids:
+            output_id = output_ids[-1]
+            recorded = state.results_by_output[output_id]
+            for call in tool_calls(state.outputs[output_id]):
+                if call.call_id not in recorded:
+                    self.record_tool_result(
+                        model_output_event_id=output_id,
+                        call_id=call.call_id,
+                        status="interrupted",
+                        content=INTERRUPTED_TOOL_RESULT,
+                    )
+        self.fail_query(
+            prompt_id,
+            stage="interrupted",
+            message="Previous request was interrupted. Send a message to continue.",
+        )
 
     def ui_history(self) -> tuple[UiHistoryItem, ...]:
         return tuple(UiHistoryProjector(self._transcript).items())

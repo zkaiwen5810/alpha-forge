@@ -66,7 +66,7 @@ SLASH_COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("/help", "Show commands", _help),
     SlashCommand("/model", "List available models", _model),
     SlashCommand("/quit", "Exit the chat", _exit),
-    SlashCommand("/resume", "Resume a transcript file", _resume),
+    SlashCommand("/resume", "Restore saved history and wait for a new message", _resume),
 )
 
 

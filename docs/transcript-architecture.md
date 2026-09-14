@@ -12,7 +12,7 @@ for each consumer.
   translates these values to OpenAI Chat Completions dictionaries.
 - `transcript` owns the schema-v1 event catalog, strict codec, protocol replay
   validation, and exclusive JSONL writer.
-- `projectors` derives provider context, recovery state, and flat UI facts from
+- `projectors` derives provider context and flat UI facts from
   committed transcript records.
 - `context` owns immutable provider-context values and ordered context-edit
   policies. It does not execute tools or call a provider.
@@ -36,7 +36,7 @@ Start with `cli.run_repl_async`: it creates an `ApplicationCoordinator` and a
 
 | Component | Owns | Collaborates through |
 | --- | --- | --- |
-| `ApplicationCoordinator` | Input acceptance, FIFO, recovery priority, slash commands, session switching, failure handling, shutdown | `Session`, `QueryRunner`, `PermissionBroker`, application events |
+| `ApplicationCoordinator` | Input acceptance, FIFO, session activation, slash commands, session switching, failure handling, shutdown | `Session`, `QueryRunner`, `PermissionBroker`, application events |
 | `QueryRunner` | Session-specific query requests, effect/feedback iteration, context preparation, durable effects, progress publication | An explicit session for each request/run; no retained current session |
 | `PermissionBroker` | One pending approval future and resolution exactly once | Application permission events and the coordinator's request/resolve methods |
 | `Session` | Transcript commands, projections, creation, resume, and closing | Transcript storage and projectors |
@@ -210,25 +210,39 @@ the exact input to one provider request and is discarded before the next
 iteration. This prevents transcript projection and a query-local copy from
 diverging.
 
-## Recovery and missing tool results
+## Restoring history and interrupting abandoned work
 
-Resume first opens, validates, and projects the transcript. Semantic recovery
-does not execute tools or synthesize events merely because the file was
-opened. The storage layer may still truncate an incomplete final JSONL
-fragment left by a torn write.
+`/resume PATH` restores a conversation and waits for user input. It never
+continues an old query, calls the provider, or executes tools. Sending a new
+message (including “continue”) starts a fresh query with the saved context
+and a fresh intermediate-round budget.
 
-If replay finds an open prompt whose latest model output has missing results,
-the coordinator schedules query continuation ahead of queued user input. At
-the start of that continuation, the query yields one `CommitToolResult` with
-status `interrupted` for each absent call in provider order. Recorded results
-remain untouched. Only after every missing result is durable does normal
-context preparation run.
+`Session.resume()` opens and validates the transcript without appending semantic
+events. The storage layer may still truncate an incomplete final JSONL fragment
+left by a torn write. Opening a transcript for inspection does not close a query.
 
-This boundary is deliberate: a tool side effect might have happened before a
-crash even though its result did not reach the WAL. Re-executing it is unsafe,
-while mutating the log merely by opening it makes inspection and validation
-surprising. Continuation preparation is the first point that both needs a
-provider-valid exchange and has explicit authority to write.
+When the coordinator starts consuming input or prepares a destination session,
+it calls `Session.interrupt_open_query()`. This idempotent operation uses the
+transcript indexes to append an `interrupted` result for each missing tool call,
+in provider order, then closes the abandoned prompt with
+`query.failed(stage="interrupted")`. The UI displays:
+“Previous request was interrupted. Send a message to continue.”
+
+Existing results remain intact. A missing result has an unknown execution outcome:
+a side effect may have happened before the result reached the WAL. Placeholders
+record this uncertainty and complete the tool exchange for subsequent model
+context; they do not execute or retry tools. Saved outputs and results remain
+available to both model and UI projections.
+
+Each finalization append is durable. If a crash interrupts finalization, the next
+activation fills only the results still missing and appends the terminal event
+once. Completed and already failed queries need no finalization writes.
+
+A destination is finalized and linked before the coordinator switches sessions.
+If preparation fails, its writer is closed and the source remains selected.
+Failure during startup activation halts persistence and prevents queued queries
+from running. The coordinator has a single input FIFO; the query engine receives
+only a newly accepted prompt ID, tool specifications, and a tool executor.
 
 ## UI projection and responsiveness
 

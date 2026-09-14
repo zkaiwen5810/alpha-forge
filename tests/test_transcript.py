@@ -16,8 +16,10 @@ from alpha_forge.transcript import (
     ContextEdited,
     InputAccepted,
     PolicyInvocation,
+    QueryFailed,
     SCHEMA_VERSION,
     SetToolExchangeVisibility,
+    ToolResult,
     TranscriptCorruptError,
     TranscriptPersistenceError,
     TranscriptStore,
@@ -28,6 +30,7 @@ from alpha_forge.projectors import (
 )
 from alpha_forge.projectors.ui_history import (
     UiModelOutput,
+    UiQueryFailure,
     UiToolResult,
 )
 
@@ -99,7 +102,7 @@ class TranscriptSchemaTests(unittest.TestCase):
 
             resumed = Session.resume(path)
             self.assertEqual(resumed.ui_history(), expected)
-            self.assertIsNone(resumed.open_query())
+            self.assertIsNone(resumed.transcript.state.active_prompt_event_id)
             resumed.close()
 
     def test_context_edit_round_trips_with_reproducible_projection(self) -> None:
@@ -236,6 +239,125 @@ class TranscriptSchemaTests(unittest.TestCase):
                     expected_revision=revision,
                 )
             store.close()
+
+
+class SessionInterruptionTests(unittest.TestCase):
+    def test_activation_preserves_history_and_closes_each_unfinished_boundary(self):
+        for recorded_count in (None, 0, 1, 2):
+            with self.subTest(recorded_count=recorded_count):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "session.jsonl"
+                    session = Session.create(transcript_path=path)
+                    prompt = session.accept_prompt("unfinished")
+                    if recorded_count is not None:
+                        output = session.record_model_output(
+                            prompt.event_id,
+                            ProviderOutput((
+                                ToolCall("one", "tool", "{}"),
+                                ToolCall("two", "tool", "{}"),
+                            )),
+                        )
+                        for call_id in ("one", "two")[:recorded_count]:
+                            session.record_tool_result(
+                                model_output_event_id=output.event_id,
+                                call_id=call_id,
+                                status="success",
+                                content=f"saved {call_id}",
+                            )
+                    original = session.transcript.records
+                    session.close()
+                    original_bytes = path.read_bytes()
+
+                    session = Session.resume(path)
+                    self.assertEqual(path.read_bytes(), original_bytes)
+                    self.assertEqual(session.transcript.records, original)
+                    session.interrupt_open_query()
+                    self.assertEqual(session.transcript.records[:len(original)], original)
+                    results = [
+                        event for event in session.transcript.events
+                        if isinstance(event, ToolResult)
+                    ]
+                    if recorded_count is None:
+                        self.assertEqual(results, [])
+                    else:
+                        self.assertEqual([r.call_id for r in results], ["one", "two"])
+                        self.assertEqual(
+                            [r.status for r in results],
+                            ["success"] * recorded_count
+                            + ["interrupted"] * (2 - recorded_count),
+                        )
+                        for result in results[recorded_count:]:
+                            self.assertIn("outcome is unknown", result.content)
+                    failure = session.transcript.events[-1]
+                    self.assertIsInstance(failure, QueryFailed)
+                    self.assertEqual(failure.stage, "interrupted")
+                    self.assertEqual(failure.prompt_event_id, prompt.event_id)
+                    self.assertIsInstance(session.ui_history()[-1], UiQueryFailure)
+                    expected_context = ModelContextProjector(session.transcript).project()
+                    revision = session.revision
+                    session.interrupt_open_query()
+                    self.assertEqual(session.revision, revision)
+                    session.close()
+
+                    session = Session.resume(path)
+                    session.interrupt_open_query()
+                    self.assertEqual(session.revision, revision)
+                    self.assertEqual(
+                        ModelContextProjector(session.transcript).project(),
+                        expected_context,
+                    )
+                    session.accept_prompt("continue")
+                    session.close()
+
+    def test_finalization_restarts_after_each_failed_append(self):
+        for committed_count in (0, 1, 2):
+            with self.subTest(committed_count=committed_count):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "session.jsonl"
+                    session = Session.create(transcript_path=path)
+                    prompt = session.accept_prompt("unfinished")
+                    session.record_model_output(
+                        prompt.event_id,
+                        ProviderOutput((
+                            ToolCall("one", "tool", "{}"),
+                            ToolCall("two", "tool", "{}"),
+                        )),
+                    )
+                    revision = session.revision
+                    commit = session._commit
+
+                    def fail_after_commits(event):
+                        if session.revision == revision + committed_count:
+                            raise TranscriptPersistenceError("disk full")
+                        return commit(event)
+
+                    with patch.object(session, "_commit", side_effect=fail_after_commits):
+                        with self.assertRaises(TranscriptPersistenceError):
+                            session.interrupt_open_query()
+                    self.assertEqual(session.revision, revision + committed_count)
+                    session.close()
+
+                    session = Session.resume(path)
+                    session.interrupt_open_query()
+                    self.assertEqual(session.revision, revision + 3)
+                    self.assertIsNone(session.transcript.state.active_prompt_event_id)
+                    ModelContextProjector(session.transcript).project()
+                    session.close()
+
+    def test_empty_completed_and_failed_queries_need_no_finalization(self):
+        for ending in ("empty", "completed", "failed"):
+            with self.subTest(ending=ending):
+                session = Session.create(in_memory=True)
+                self.addCleanup(session.close)
+                if ending != "empty":
+                    prompt = session.accept_prompt("hello")
+                    if ending == "completed":
+                        session.record_model_output(prompt.event_id, _answer("done"))
+                    else:
+                        session.fail_query(prompt.event_id, stage="provider", message="offline")
+                revision = session.revision
+                session.interrupt_open_query()
+                self.assertEqual(session.revision, revision)
 
 
 class TranscriptProtocolTests(unittest.TestCase):

@@ -15,6 +15,7 @@ InputKind = Literal["prompt", "command"]
 SessionLinkKind = Literal["clear", "resume"]
 ToolResultStatus = Literal["success", "error", "interrupted"]
 QueryFailureStage = Literal[
+    "interrupted",
     "context",
     "provider",
     "intermediate_round_limit",

@@ -467,6 +467,7 @@ class TranscriptState:
         if event.prompt_event_id != self.active_prompt_event_id:
             self._fail("query failure does not reference the active prompt")
         if event.stage not in (
+            "interrupted",
             "context",
             "provider",
             "intermediate_round_limit",

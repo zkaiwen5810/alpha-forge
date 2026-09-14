@@ -26,7 +26,7 @@ from alpha_forge.providers import ProviderOutput, ToolCall
 from alpha_forge.sessions import Session
 from alpha_forge.sessions.tool_result_reader import ToolResultReader
 from alpha_forge.tools import Tool, ToolRegistry
-from alpha_forge.transcript import InputAccepted, TranscriptPersistenceError
+from alpha_forge.transcript import InputAccepted, QueryFailed, TranscriptPersistenceError
 from tests.test_query import ScriptedProvider, _text
 
 
@@ -176,7 +176,7 @@ class ApplicationLifecycleTests(unittest.TestCase):
         self.assertEqual([e.allowed for e in resolutions], [False])
         self.assertEqual(session.revision, 1)
 
-    def test_resume_recovers_before_queued_prompt_and_reader_uses_destination(self):
+    def test_resume_interrupts_before_queued_prompt_and_reader_uses_destination(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "resume.jsonl"
             saved = Session.create(transcript_path=path)
@@ -212,7 +212,6 @@ class ApplicationLifecycleTests(unittest.TestCase):
                             ),
                         )
                     ),
-                    _text("recovered"),
                     _text("next answer"),
                 ]
             )
@@ -229,10 +228,10 @@ class ApplicationLifecycleTests(unittest.TestCase):
 
             asyncio.run(run())
             contexts = provider.contexts
-            self.assertEqual(len(contexts), 3)
+            self.assertEqual(len(contexts), 2)
             self.assertEqual(
                 [m.content for m in contexts[0].items if isinstance(m, UserMessage)],
-                ["saved prompt"],
+                ["saved prompt", "next prompt"],
             )
             recovered = [
                 m for m in contexts[0].items if isinstance(m, ToolResultContext)
@@ -246,11 +245,91 @@ class ApplicationLifecycleTests(unittest.TestCase):
             self.assertTrue(read.content.startswith("destination result\n"))
             self.assertEqual(read.status, "success")
             self.assertEqual(
-                [m.content for m in contexts[2].items if isinstance(m, UserMessage)],
+                [m.content for m in contexts[1].items if isinstance(m, UserMessage)],
                 ["saved prompt", "next prompt"],
             )
             with self.assertRaisesRegex(TranscriptPersistenceError, "closed"):
                 source.accept_prompt("closed")
+
+    def test_resume_without_prompt_does_not_request_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            saved = Session.create(transcript_path=path)
+            saved.accept_prompt("unfinished")
+            saved.close()
+            provider = ScriptedProvider([])
+            coordinator = ApplicationCoordinator(
+                Config("key"), provider=provider, session=Session.create(in_memory=True)
+            )
+
+            async def run():
+                coordinator.submit(f"/resume {path}")
+                coordinator.request_exit()
+                await coordinator.consume()
+
+            asyncio.run(run())
+            self.assertEqual(provider.contexts, [])
+            self.assertIsNone(coordinator.session.transcript.state.active_prompt_event_id)
+            failures = [
+                e for e in coordinator.session.transcript.events
+                if isinstance(e, QueryFailed)
+            ]
+            self.assertEqual([e.stage for e in failures], ["interrupted"])
+
+    def test_startup_finalization_failure_halts_queued_work(self):
+        session = Session.create(in_memory=True)
+        session.accept_prompt("unfinished")
+        provider = ScriptedProvider([])
+        coordinator = ApplicationCoordinator(Config("key"), provider=provider, session=session)
+        events = []
+        coordinator.event_router.subscribe(Event, events.append)
+
+        async def run():
+            coordinator.submit("must not run")
+            coordinator.request_exit()
+            await coordinator.consume()
+
+        with patch.object(session, "fail_query", side_effect=TranscriptPersistenceError("disk full")):
+            asyncio.run(run())
+        self.assertEqual(provider.contexts, [])
+        self.assertEqual(session.revision, 2)
+        self.assertFalse(coordinator.accepting)
+        self.assertEqual(
+            [(e.stage, e.message) for e in events if isinstance(e, PersistenceFailed)],
+            [("session activation", "disk full")],
+        )
+        self.assertIsInstance(events[-1], ExitReady)
+
+    def test_destination_finalization_failure_retains_source_and_releases_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "session.jsonl"
+            saved = Session.create(transcript_path=path)
+            prompt = saved.accept_prompt("unfinished")
+            saved.record_model_output(
+                prompt.event_id, ProviderOutput((ToolCall("missing", "echo", "{}"),))
+            )
+            saved.close()
+            source = Session.create(in_memory=True)
+            provider = ScriptedProvider([_text("done")])
+            coordinator = ApplicationCoordinator(Config("key"), provider=provider, session=source)
+
+            async def run():
+                coordinator.submit(f"/resume {path}")
+                coordinator.submit("still here")
+                coordinator.request_exit()
+                await coordinator.consume()
+
+            with patch.object(Session, "fail_query", side_effect=TranscriptPersistenceError("disk full")):
+                asyncio.run(run())
+            self.assertIs(coordinator.session, source)
+            self.assertEqual(len(provider.contexts), 1)
+            self.assertEqual(source.transcript.events[2].status, "error")
+            self.assertIn("disk full", source.transcript.events[2].messages[0].content)
+            resumed = Session.resume(path)
+            self.addCleanup(resumed.close)
+            self.assertEqual(resumed.transcript.events[-1].status, "interrupted")
+            resumed.interrupt_open_query()
+            self.assertIsNone(resumed.transcript.state.active_prompt_event_id)
 
     def test_failed_resume_keeps_source_for_next_prompt(self):
         with tempfile.TemporaryDirectory() as tmp:
