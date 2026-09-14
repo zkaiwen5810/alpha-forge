@@ -114,8 +114,8 @@ __all__ = [
     "SessionView",
     "SessionViewChanged",
     "StatusChanged",
-    "ToolResultRecorded",
     "ToolPermissionRequested",
     "ToolPermissionResolved",
+    "ToolResultRecorded",
     "ToolStarted",
 ]

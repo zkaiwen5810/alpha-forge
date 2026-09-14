@@ -35,6 +35,7 @@ from alpha_forge.transcript.records import (
 from alpha_forge.transcript.store import TranscriptStore
 
 __all__ = [
+    "SCHEMA_VERSION",
     "CommandCompleted",
     "CommandMessage",
     "CommandStatus",
@@ -48,9 +49,8 @@ __all__ = [
     "PolicyInvocation",
     "QueryFailed",
     "QueryFailureStage",
-    "SCHEMA_VERSION",
-    "SessionLinked",
     "SessionLinkKind",
+    "SessionLinked",
     "SessionOpened",
     "SetToolExchangeVisibility",
     "SetToolResultRepresentation",

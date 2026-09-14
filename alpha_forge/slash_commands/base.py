@@ -81,8 +81,8 @@ class SlashCommandHandler:
 __all__ = [
     "CommandAction",
     "CommandContext",
-    "ModelCatalog",
     "CommandOutcome",
+    "ModelCatalog",
     "ParsedCommand",
     "SlashCommand",
     "SlashCommandHandler",
