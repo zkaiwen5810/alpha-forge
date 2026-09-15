@@ -13,8 +13,7 @@ from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.utils import Event as WidgetEvent
 
-from alpha_forge.application.events import SessionView
-from alpha_forge.events import Event
+from alpha_forge.application.events import ApplicationEvent, SessionView
 from alpha_forge.ui.component import UiComponent
 from alpha_forge.ui.history_state import HistoryState
 
@@ -36,7 +35,7 @@ class HistoryControl(UIControl):
             always_hide_cursor=True,
         )
 
-    def handle(self, event: Event) -> bool:
+    def handle(self, event: ApplicationEvent) -> bool:
         """Application event entry point, independent of the UIControl interface."""
         return self.state.handle(event)
 
@@ -190,7 +189,7 @@ class HistoryArea:
         """prompt-toolkit widget protocol: return the root container (not an override)."""
         return self._container
 
-    def handle(self, event: Event) -> None:
+    def handle(self, event: ApplicationEvent) -> None:
         """Application event entry point called by our parent, not prompt-toolkit."""
         if self.control.handle(event):
             self.on_change.fire()

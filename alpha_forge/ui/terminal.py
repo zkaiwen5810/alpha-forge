@@ -14,8 +14,7 @@ from prompt_toolkit.output.base import Output
 from prompt_toolkit.styles import Style
 
 from alpha_forge.application.coordinator import ApplicationCoordinator
-from alpha_forge.application.events import ExitReady
-from alpha_forge.events import Event
+from alpha_forge.application.events import ApplicationEvent, ExitReady
 from alpha_forge.ui.bottom import BottomArea
 from alpha_forge.ui.component import UiComponent
 from alpha_forge.ui.history import HistoryArea
@@ -58,7 +57,7 @@ class TerminalChatUi:
         self.history_area.on_change += self._component_changed
         self.bottom_area.on_change += self._component_changed
         self._event_subscription = coordinator.event_router.subscribe(
-            Event,
+            ApplicationEvent,
             self._handle_application_event,
         )
 
@@ -70,7 +69,7 @@ class TerminalChatUi:
         """Subscriber to our components' on_change notifications; request repaint."""
         self._redraw()
 
-    def _handle_application_event(self, event: Event) -> None:
+    def _handle_application_event(self, event: ApplicationEvent) -> None:
         """Subscriber to the coordinator event router, not a toolkit callback."""
         self.history_area.handle(event)
         self.bottom_area.handle(event)

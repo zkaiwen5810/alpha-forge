@@ -6,18 +6,18 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from alpha_forge.application.events import (
+    ApplicationEvent,
     ModelOutputRecorded,
     PersistenceFailed,
-    ProviderDeltaReceived,
-    ProviderRequestStarted,
-    ProviderResponseCompleted,
     RequestFailed,
+    ResponseStreamCompleted,
+    ResponseStreamStarted,
+    ResponseStreamUpdated,
     SessionView,
     SessionViewChanged,
+    ToolCallProcessingStarted,
     ToolResultRecorded,
-    ToolStarted,
 )
-from alpha_forge.events import Event
 from alpha_forge.projectors.ui_history import (
     UiCommandMessage,
     UiModelOutput,
@@ -96,25 +96,25 @@ class HistoryState:
         self._cache_revision: int | None = None
         self._transcript_cache: tuple[HistoryLine, ...] = ()
 
-    def handle(self, event: Event) -> bool:
+    def handle(self, event: ApplicationEvent) -> bool:
         """Application state reducer called by its owner; no toolkit hook involved."""
         if isinstance(event, SessionViewChanged):
             self.view = event.view
             if event.reset_active:
                 self.active_operation = None
             self._cache_revision = None
-        elif isinstance(event, ProviderRequestStarted):
+        elif isinstance(event, ResponseStreamStarted):
             self.active_operation = ActiveProviderResponse(
                 event.prompt_event_id,
                 event.request_id,
             )
-        elif isinstance(event, ProviderDeltaReceived):
+        elif isinstance(event, ResponseStreamUpdated):
             self._active_provider(event.request_id).accumulator.apply(event.delta)
-        elif isinstance(event, ProviderResponseCompleted):
+        elif isinstance(event, ResponseStreamCompleted):
             self._active_provider(event.request_id).output = event.output
         elif isinstance(event, (ModelOutputRecorded, RequestFailed)):
             self.active_operation = None
-        elif isinstance(event, ToolStarted):
+        elif isinstance(event, ToolCallProcessingStarted):
             self.active_operation = ActiveTool(event.model_output_event_id, event.call)
         elif isinstance(event, ToolResultRecorded):
             if (

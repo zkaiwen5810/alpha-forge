@@ -73,6 +73,9 @@ class SessionAndCoordinatorTests(unittest.TestCase):
             await asyncio.sleep(0)
             request = events[0]
             self.assertIsInstance(request, ToolPermissionRequested)
+            self.assertEqual(request.call_id, lifecycle.call_id)
+            self.assertEqual(request.tool_name, lifecycle.tool_name)
+            self.assertEqual(request.tool_input, lifecycle.tool_input)
             self.assertTrue(
                 coordinator.resolve_tool_permission(request.request_id, True)
             )

@@ -17,11 +17,11 @@ from alpha_forge.query.protocol import (
     ProviderRequestStarted,
     ProviderResponseCompleted,
     QueryCompleted,
+    QueryEmission,
     QueryExecutionError,
     QueryFeedback,
     QueryRequest,
-    QueryStreamEvent,
-    ToolExecutionStarted,
+    ToolCallProcessingStarted,
     ToolResultCommitted,
 )
 
@@ -45,7 +45,7 @@ class QueryEngine:
     async def run(
         self,
         request: QueryRequest,
-    ) -> AsyncGenerator[QueryStreamEvent, QueryFeedback | None]:
+    ) -> AsyncGenerator[QueryEmission, QueryFeedback | None]:
         intermediate_rounds = 0
 
         while True:
@@ -125,7 +125,7 @@ class QueryEngine:
 
             committed_revision = committed.revision
             for call in completed.tool_calls:
-                yield ToolExecutionStarted(output_event_id, call)
+                yield ToolCallProcessingStarted(output_event_id, call)
                 try:
                     result = await request.tool_executor.execute(call)
                 except Exception as exc:  # noqa: BLE001

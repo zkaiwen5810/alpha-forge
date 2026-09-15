@@ -15,7 +15,6 @@ from alpha_forge.application.events import (
     ToolPermissionResolved,
     ToolResultRecorded,
 )
-from alpha_forge.hooks import PreToolExecution
 from alpha_forge.json_values import FrozenJsonObject
 from alpha_forge.ui.bottom import BottomArea
 
@@ -23,11 +22,9 @@ from alpha_forge.ui.bottom import BottomArea
 def permission_request(request_id="request"):
     return ToolPermissionRequested(
         request_id,
-        PreToolExecution(
-            call_id="call",
-            tool_name="bash",
-            tool_input=FrozenJsonObject({"cmd": "pwd"}),
-        ),
+        call_id="call",
+        tool_name="bash",
+        tool_input=FrozenJsonObject({"cmd": "pwd"}),
     )
 
 

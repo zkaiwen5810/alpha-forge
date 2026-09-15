@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from alpha_forge.application import ApplicationCoordinator
 from alpha_forge.application.events import (
+    ApplicationEvent,
     ExitReady,
     ModelOutputRecorded,
     PersistenceFailed,
@@ -19,7 +20,6 @@ from alpha_forge.application.events import (
 )
 from alpha_forge.config import Config
 from alpha_forge.context import ToolResultContext, UserMessage
-from alpha_forge.events import Event
 from alpha_forge.hooks import PreToolExecution
 from alpha_forge.json_values import FrozenJsonObject
 from alpha_forge.providers import ProviderOutput, ToolCall
@@ -68,7 +68,7 @@ class ApplicationLifecycleTests(unittest.TestCase):
                     tool_registry=registry,
                 )
                 events = []
-                coordinator.event_router.subscribe(Event, events.append)
+                coordinator.event_router.subscribe(ApplicationEvent, events.append)
 
                 async def run():
                     coordinator.submit("first prompt")
@@ -112,7 +112,7 @@ class ApplicationLifecycleTests(unittest.TestCase):
             session=session,
         )
         events = []
-        coordinator.event_router.subscribe(Event, events.append)
+        coordinator.event_router.subscribe(ApplicationEvent, events.append)
 
         commit_snapshots = []
 
@@ -147,7 +147,7 @@ class ApplicationLifecycleTests(unittest.TestCase):
             Config("key"), provider=ScriptedProvider([]), session=session
         )
         events = []
-        coordinator.event_router.subscribe(Event, events.append)
+        coordinator.event_router.subscribe(ApplicationEvent, events.append)
         lifecycle = PreToolExecution(
             call_id="call",
             tool_name="bash",
@@ -282,7 +282,7 @@ class ApplicationLifecycleTests(unittest.TestCase):
         provider = ScriptedProvider([])
         coordinator = ApplicationCoordinator(Config("key"), provider=provider, session=session)
         events = []
-        coordinator.event_router.subscribe(Event, events.append)
+        coordinator.event_router.subscribe(ApplicationEvent, events.append)
 
         async def run():
             coordinator.submit("must not run")

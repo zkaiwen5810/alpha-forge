@@ -43,12 +43,13 @@ Start with `cli.run_repl_async`: it creates an `ApplicationCoordinator` and a
 | `ToolResultReader` | Raw-result paging and its tool definition | The transcript selected for the current query |
 | `TerminalChatUi` | Application lifetime, styles, global actions, status-bar formatting, coordinator integration | History and bottom-area interfaces |
 | `HistoryArea` | Conversation region and navigation | History control/state and upward change notifications |
-| `BottomArea` | Queue, input/permission visibility, status, focus routing | Child widget interfaces and upward action/change hooks |
+| `BottomArea` | Queue, input/permission visibility, status, focus routing | Child widget interfaces, action callbacks, and change notifications |
 
 The terminal shell composes a fixed status bar and two major areas. It forwards
 application events to the areas and reacts to their change notifications with
 redraw requests. Only the terminal subscribes to or invokes the coordinator.
-Children communicate with their immediate parent through hooks.
+Children communicate with their immediate parent through action callbacks and
+widget change notifications. These are separate from awaited tool execution hooks.
 
 The bottom area owns the visibility relationship between permissions and the
 input panel. Suggestions are part of the input panel; queued inputs are a
@@ -69,7 +70,7 @@ unwrapped committed transcript text. UI tool-result previews retain the final
 A query runner receives the selected session explicitly. Its tool registry is a
 copy with a `ToolResultReader` bound to that session's transcript, unless a caller
 already supplied a tool with that name. Model-output and tool-result effects
-append through `Session`, publish the committed view and acknowledgment event,
+append through `Session`, publish the committed view and application notification,
 then return feedback to the query engine. Context preparation publishes a new
 view only when a policy commits an edit. The coordinator handles failures and
 owns session lifetime.
@@ -188,16 +189,90 @@ operations, the coordinator durably appends them and reprojects before
 evaluating the next policy. Consequently each policy sees the committed output
 of all earlier policies.
 
+## Event boundaries and vocabulary
+
+Append transcript facts, handle query effects, return feedback, publish
+application notifications, and await execution hooks. These operations have
+different delivery and failure semantics:
+
+| Contract | Owner and delivery | Meaning |
+| --- | --- | --- |
+| `TranscriptEvent` | `Session` appends through `TranscriptStore`; projectors read records | Stored semantic facts for replay and history |
+| `QueryEffect` | Engine yields to `QueryRunner`; runner returns `QueryFeedback` through `asend` | Application work requested before the engine can continue |
+| `QueryProgress` | Engine yields to `QueryRunner` without feedback | Ephemeral execution observations |
+| `ApplicationEvent` | `ApplicationEventRouter` synchronously calls subscribers in registration order | Presentation notifications, including streaming and permission state |
+| `HookContext` | `ToolExecutor` awaits matching `HookRegistry` actions in order | Validated interception context; a raised exception prevents invocation |
+
+`QueryMessage` is the base for effects and progress; `QueryEmission` is the union
+of concrete yielded messages. Neither belongs to the application event hierarchy.
+The application router rejects other message families. Subscriber exceptions
+propagate and stop the current delivery pass; this is synchronous notification,
+not a background queue or an isolated observer service.
+
+`QueryRunner` explicitly translates progress into application-owned types:
+
+| Query progress | Application notification |
+| --- | --- |
+| `ProviderRequestStarted` | `ResponseStreamStarted` |
+| `ProviderDeltaReceived` | `ResponseStreamUpdated` |
+| `ProviderResponseCompleted` | `ResponseStreamCompleted` |
+| `ToolCallProcessingStarted` | Application-owned `ToolCallProcessingStarted` |
+| `QueryCompleted` | `StatusChanged("Ready")` |
+
+Shared provider payload values are allowed, but message classes are distinct.
+The runner rejects unsupported effects, progress, or messages instead of silently
+discarding them. UI consumers subscribe to or handle only `ApplicationEvent`.
+
+### Received, recorded, and acknowledged
+
+`ResponseStreamCompleted` means the full response has arrived; it has not yet
+been saved. The commit sequence is:
+
+```mermaid
+sequenceDiagram
+    participant Q as QueryEngine
+    participant R as QueryRunner
+    participant S as Session / Transcript
+    participant U as Application router / UI
+    Q->>R: CommitModelOutput (effect)
+    R->>S: Record ModelOutput (transcript fact)
+    S-->>R: TranscriptRecord
+    R->>U: SessionViewChanged
+    R->>U: ModelOutputRecorded (notification)
+    R-->>Q: ModelOutputCommitted (feedback)
+```
+
+Tool results follow the same ordering. A failed append prevents the corresponding
+view, success notification, and feedback, stopping subsequent query work.
+Committed UI history comes from the projected view; streaming notifications
+update only the ephemeral preview.
+
+### Tool processing and approval
+
+`ToolCallProcessingStarted` is emitted before argument validation and approval;
+it does not establish that the tool handler has started. After validation, the
+executor awaits `PreToolExecution` hooks. The permission action calls the
+application's `PermissionBroker`, which translates this context into a
+`ToolPermissionRequested` notification with `request_id`, `call_id`, `tool_name`,
+and immutable `tool_input` fields, then awaits a decision future.
+
+The UI calls `resolve_tool_permission(request_id, allowed)` to return the decision.
+The broker resolves the future once and publishes `ToolPermissionResolved`.
+Approval lets the awaited hook return; denial raises and prevents invocation.
+The executor converts denial into an error tool result, which is then committed
+normally. Neither the hook context nor the permission notifications are stored.
+
 ## Query effect and feedback flow
 
 One accepted prompt follows this loop:
 
 1. The query yields `PrepareContext`.
-2. The coordinator runs context policies, commits non-noop edits, projects the
+2. `QueryRunner` runs context policies, commits non-noop edits, projects the
    resulting transcript, and sends `ContextPrepared` feedback.
-3. The query streams one provider request and emits progress for the UI.
+3. The query streams one provider request and emits progress, which the runner
+   translates into application notifications for the UI.
 4. The query yields `CommitModelOutput`; it cannot advance until the
-   coordinator sends `ModelOutputCommitted` with the assigned event ID and
+   runner sends `ModelOutputCommitted` with the assigned event ID and
    committed revision.
 5. If the output contains tool calls, calls execute sequentially. Each
    `CommitToolResult` similarly requires `ToolResultCommitted` feedback.

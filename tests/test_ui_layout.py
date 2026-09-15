@@ -19,7 +19,6 @@ from alpha_forge.application.events import (
     ToolPermissionRequested,
 )
 from alpha_forge.config import Config
-from alpha_forge.hooks import PreToolExecution
 from alpha_forge.json_values import FrozenJsonObject
 from alpha_forge.projectors.ui_history import UiPrompt
 from alpha_forge.sessions import Session
@@ -67,11 +66,9 @@ async def _render_snapshot(width, height, scenario):
                 coordinator.event_router.publish(
                     ToolPermissionRequested(
                         "request",
-                        PreToolExecution(
-                            call_id="call",
-                            tool_name="bash",
-                            tool_input=FrozenJsonObject({"cmd": "pwd"}),
-                        ),
+                        call_id="call",
+                        tool_name="bash",
+                        tool_input=FrozenJsonObject({"cmd": "pwd"}),
                     )
                 )
             with set_app(ui.app):

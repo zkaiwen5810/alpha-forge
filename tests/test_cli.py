@@ -7,9 +7,9 @@ from prompt_toolkit.output import DummyOutput
 from alpha_forge.application import ApplicationCoordinator
 from alpha_forge.application.events import (
     ModelOutputRecorded,
-    ProviderDeltaReceived,
-    ProviderRequestStarted,
-    ProviderResponseCompleted,
+    ResponseStreamCompleted,
+    ResponseStreamStarted,
+    ResponseStreamUpdated,
     SessionView,
     SessionViewChanged,
     ToolPermissionRequested,
@@ -93,7 +93,7 @@ class CliSurfaceTests(unittest.TestCase):
 
         self.assertEqual(safe.status, "success")
         self.assertEqual(denied.status, "error")
-        self.assertEqual([event.event.tool_name for event in requests], ["bash"])
+        self.assertEqual([event.tool_name for event in requests], ["bash"])
         self.assertEqual(invoked, ["calculator"])
         coordinator.session.close()
 
@@ -103,13 +103,13 @@ class HistoryStateTests(unittest.TestCase):
         self.state = HistoryState(SessionView("session", 1, ()))
 
     def test_provider_draft_is_ephemeral_until_committed_view(self) -> None:
-        self.state.handle(ProviderRequestStarted("prompt", "request"))
-        self.state.handle(ProviderDeltaReceived("request", TextDelta("hel")))
+        self.state.handle(ResponseStreamStarted("prompt", "request"))
+        self.state.handle(ResponseStreamUpdated("request", TextDelta("hel")))
         self.assertIn("Assistant: hel", self.state.active_text())
         self.assertEqual(self.state.transcript_text(), "No messages yet.")
 
         output = ProviderOutput((OutputMessage((OutputText("hello"),)),))
-        self.state.handle(ProviderResponseCompleted("request", output))
+        self.state.handle(ResponseStreamCompleted("request", output))
         self.assertIn("Assistant: hello", self.state.active_text())
         self.state.handle(
             SessionViewChanged(

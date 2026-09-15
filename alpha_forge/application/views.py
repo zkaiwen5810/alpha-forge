@@ -1,7 +1,7 @@
 """Build and publish immutable views of the selected session."""
 
 from alpha_forge.application.events import SessionView, SessionViewChanged
-from alpha_forge.events import EventRouter
+from alpha_forge.application.router import ApplicationEventRouter
 from alpha_forge.sessions import Session
 
 
@@ -10,7 +10,7 @@ def session_view(session: Session) -> SessionView:
 
 
 def publish_session_view(
-    event_router: EventRouter,
+    event_router: ApplicationEventRouter,
     session: Session,
     *,
     reset_active: bool = False,

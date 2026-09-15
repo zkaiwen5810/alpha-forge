@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import Literal
 
 from alpha_forge.context.models import ModelContextSnapshot
-from alpha_forge.events import Event
 from alpha_forge.providers.base import (
     ProviderDelta,
     ProviderOutput,
@@ -27,15 +26,15 @@ class QueryRequest:
     tool_executor: ToolCallExecutor
 
 
-class QueryEvent(Event):
+class QueryMessage:
     """Base for effects and ephemeral progress emitted by the query engine."""
 
 
-class QueryEffect(QueryEvent):
+class QueryEffect(QueryMessage):
     """A requested application-side action that requires feedback."""
 
 
-class QueryProgress(QueryEvent):
+class QueryProgress(QueryMessage):
     """An ephemeral observation that must never be persisted as transcript data."""
 
 
@@ -77,7 +76,9 @@ class ProviderResponseCompleted(QueryProgress):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolExecutionStarted(QueryProgress):
+class ToolCallProcessingStarted(QueryProgress):
+    """A tool call is about to be validated, approved, and invoked."""
+
     model_output_event_id: str
     call: ToolCall
 
@@ -106,14 +107,14 @@ class ToolResultCommitted:
 
 
 type QueryFeedback = ContextPrepared | ModelOutputCommitted | ToolResultCommitted
-type QueryStreamEvent = (
+type QueryEmission = (
     PrepareContext
     | CommitModelOutput
     | CommitToolResult
     | ProviderRequestStarted
     | ProviderDeltaReceived
     | ProviderResponseCompleted
-    | ToolExecutionStarted
+    | ToolCallProcessingStarted
     | QueryCompleted
 )
 type QueryFailureStage = Literal[
@@ -144,12 +145,12 @@ __all__ = [
     "ProviderResponseCompleted",
     "QueryCompleted",
     "QueryEffect",
-    "QueryEvent",
+    "QueryEmission",
     "QueryExecutionError",
     "QueryFeedback",
+    "QueryMessage",
     "QueryProgress",
     "QueryRequest",
-    "QueryStreamEvent",
-    "ToolExecutionStarted",
+    "ToolCallProcessingStarted",
     "ToolResultCommitted",
 ]

@@ -6,16 +6,16 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
-from alpha_forge.hooks.events import LifecycleEvent
+from alpha_forge.hooks.events import HookContext
 from alpha_forge.hooks.matcher import HookMatcher
 
 # Hook actions are side-effect-only guards/observers. Dispatch deliberately has no
 # return-value channel; an action must raise to abort the intercepted operation.
-type HookAction[EventType: LifecycleEvent] = Callable[[EventType], Awaitable[None]]
+type HookAction[EventType: HookContext] = Callable[[EventType], Awaitable[None]]
 
 
 @dataclass(frozen=True, slots=True)
-class Hook[EventType: LifecycleEvent]:
+class Hook[EventType: HookContext]:
     matcher: HookMatcher[EventType]
     action: HookAction[EventType]
 
@@ -26,10 +26,10 @@ class HookRegistry:
     def __init__(self, hooks: Iterable[Hook[Any]] | None = None) -> None:
         self._hooks: list[Hook[Any]] = list(hooks or ())
 
-    def register[EventType: LifecycleEvent](self, hook: Hook[EventType]) -> None:
+    def register[EventType: HookContext](self, hook: Hook[EventType]) -> None:
         self._hooks.append(cast(Hook[Any], hook))
 
-    async def dispatch(self, event: LifecycleEvent) -> None:
+    async def dispatch(self, event: HookContext) -> None:
         for hook in tuple(self._hooks):
             if hook.matcher.matches(event):
                 # Do not collect action results. Exceptions propagate so a guard

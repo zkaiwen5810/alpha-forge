@@ -9,7 +9,7 @@ from prompt_toolkit.layout.containers import ConditionalContainer
 from prompt_toolkit.layout.controls import FormattedTextControl, UIControl
 from prompt_toolkit.utils import Event as WidgetEvent
 
-from alpha_forge.events import Event
+from alpha_forge.application.events import ApplicationEvent
 from alpha_forge.ui.component import UiComponent
 from alpha_forge.ui.input import InputPanel
 from alpha_forge.ui.permission import PermissionPanel
@@ -89,7 +89,7 @@ class BottomArea:
             else self.input_panel.focus_target
         )
 
-    def handle(self, event: Event) -> None:
+    def handle(self, event: ApplicationEvent) -> None:
         """Application event entry point called by our parent, not prompt-toolkit."""
         self.queued_inputs.handle(event)
         status_changed = self._status_state.handle(
@@ -101,7 +101,7 @@ class BottomArea:
             self.on_change.fire()
 
     def _child_changed(self, _child: UiComponent) -> None:
-        """Subscriber to our child on_change events, using toolkit Event machinery."""
+        """Subscriber to child widget notifications; requests a parent notification."""
         self.on_change.fire()
 
     def _submit_input(self, text: str) -> None:

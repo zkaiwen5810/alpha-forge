@@ -7,12 +7,12 @@ from alpha_forge.application.events import (
     ToolPermissionRequested,
     ToolPermissionResolved,
 )
-from alpha_forge.events import EventRouter
+from alpha_forge.application.router import ApplicationEventRouter
 from alpha_forge.hooks import PreToolExecution
 
 
 class PermissionBroker:
-    def __init__(self, event_router: EventRouter) -> None:
+    def __init__(self, event_router: ApplicationEventRouter) -> None:
         self.event_router = event_router
         self._pending_permission: tuple[str, asyncio.Future[bool]] | None = None
 
@@ -29,7 +29,14 @@ class PermissionBroker:
         request_id = uuid4().hex
         future = asyncio.get_running_loop().create_future()
         self._pending_permission = (request_id, future)
-        self.event_router.publish(ToolPermissionRequested(request_id, event))
+        self.event_router.publish(
+            ToolPermissionRequested(
+                request_id=request_id,
+                call_id=event.call_id,
+                tool_name=event.tool_name,
+                tool_input=event.tool_input,
+            )
+        )
         try:
             return await future
         finally:

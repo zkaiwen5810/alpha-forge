@@ -1,23 +1,23 @@
 """Status messages derived from application progress."""
 
 from alpha_forge.application.events import (
+    ApplicationEvent,
     ExitRequested,
     InputQueued,
     InputStarted,
     ModelOutputRecorded,
     PersistenceFailed,
-    ProviderDeltaReceived,
-    ProviderRequestStarted,
-    ProviderResponseCompleted,
     RequestFailed,
+    ResponseStreamCompleted,
+    ResponseStreamStarted,
+    ResponseStreamUpdated,
     SessionViewChanged,
     StatusChanged,
+    ToolCallProcessingStarted,
     ToolPermissionRequested,
     ToolPermissionResolved,
     ToolResultRecorded,
-    ToolStarted,
 )
-from alpha_forge.events import Event
 
 
 class StatusState:
@@ -26,7 +26,7 @@ class StatusState:
         self.exiting = False
         self.persistence_error: str | None = None
 
-    def handle(self, event: Event, *, queued_count: int) -> bool:
+    def handle(self, event: ApplicationEvent, *, queued_count: int) -> bool:
         """Application state reducer called by its owner; no toolkit hook involved."""
         if isinstance(
             event,
@@ -39,14 +39,14 @@ class StatusState:
             ),
         ):
             self.message = self._queue_status(queued_count)
-        elif isinstance(event, (ProviderRequestStarted, ProviderDeltaReceived)):
+        elif isinstance(event, (ResponseStreamStarted, ResponseStreamUpdated)):
             self.message = "Streaming response"
-        elif isinstance(event, ProviderResponseCompleted):
+        elif isinstance(event, ResponseStreamCompleted):
             self.message = "Saving response"
-        elif isinstance(event, ToolStarted):
+        elif isinstance(event, ToolCallProcessingStarted):
             self.message = f"Running tool: {event.call.name}"
         elif isinstance(event, ToolPermissionRequested):
-            self.message = f"Approval required: {event.event.tool_name}"
+            self.message = f"Approval required: {event.tool_name}"
         elif isinstance(event, ToolPermissionResolved):
             self.message = "Running approved tool" if event.allowed else "Denying tool"
         elif isinstance(event, PersistenceFailed):

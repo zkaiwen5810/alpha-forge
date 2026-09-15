@@ -10,12 +10,12 @@ from prompt_toolkit.utils import Event as WidgetEvent
 from prompt_toolkit.widgets import Button, Dialog, Label
 
 from alpha_forge.application.events import (
+    ApplicationEvent,
     RequestFailed,
     ToolPermissionRequested,
     ToolPermissionResolved,
     ToolResultRecorded,
 )
-from alpha_forge.events import Event
 from alpha_forge.json_values import thaw_json
 from alpha_forge.ui.component import UiComponent
 
@@ -58,7 +58,7 @@ class PermissionPanel:
         """Application predicate passed by BottomArea to prompt-toolkit Condition."""
         return self.pending_request is not None
 
-    def handle(self, event: Event) -> None:
+    def handle(self, event: ApplicationEvent) -> None:
         """Application event entry point called by our parent, not prompt-toolkit."""
         if isinstance(event, ToolPermissionRequested):
             self.pending_request = event
@@ -86,7 +86,7 @@ class PermissionPanel:
         if pending is None:
             return ""
         serialized = json.dumps(
-            thaw_json(pending.event.tool_input),
+            thaw_json(pending.tool_input),
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -97,7 +97,7 @@ class PermissionPanel:
                 + f"… [{omitted} characters omitted]"
             )
         return (
-            f"Tool: {pending.event.tool_name}\n"
+            f"Tool: {pending.tool_name}\n"
             f"Arguments: {serialized}\n"
             "Select Deny or Allow once. Escape denies."
         )

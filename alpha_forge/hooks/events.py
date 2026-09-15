@@ -1,4 +1,4 @@
-"""Immutable, discriminated lifecycle events exposed to hook actions."""
+"""Immutable interception context passed to awaited hook actions."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ class PreToolExecution:
     )
 
 
-type LifecycleEvent = PreToolExecution
+type HookContext = PreToolExecution
 
 
-__all__ = ["LifecycleEvent", "PreToolExecution"]
+__all__ = ["HookContext", "PreToolExecution"]

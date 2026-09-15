@@ -7,8 +7,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.utils import Event as WidgetEvent
 from prompt_toolkit.widgets import TextArea
 
-from alpha_forge.application.events import InputQueued, InputStarted
-from alpha_forge.events import Event
+from alpha_forge.application.events import ApplicationEvent, InputQueued, InputStarted
 from alpha_forge.ui.component import UiComponent
 from alpha_forge.ui.text import set_text
 
@@ -53,7 +52,7 @@ class QueuedInputsPanel:
         """Predicate passed to Condition for prompt-toolkit visibility evaluation."""
         return bool(self._queued_inputs)
 
-    def handle(self, event: Event) -> None:
+    def handle(self, event: ApplicationEvent) -> None:
         """Application event entry point called by our parent, not prompt-toolkit."""
         if isinstance(event, InputQueued):
             self._queued_inputs[event.item_id] = event.raw

@@ -39,7 +39,7 @@ italic gray text; the queue has a bold gray heading and gray prompt text.
 | `HistoryControl` / `HistoryState` | History viewport, wrapping, committed-line cache, streaming/tool previews | Used inside the history area |
 | `QueuedInputsPanel` | Queue contents and titled queue display | Widget protocol, `handle()`, `pending_inputs` |
 | `InputPanel` | Draft, input history, completion, editor, suggestions, model footer | Widget protocol, `focus_target`, `has_draft`, `complete_slash_command()` |
-| `PermissionPanel` | Pending approval, bounded preview, buttons, request/resolution focus hooks | Widget protocol, `handle()`, `focus_target`, `has_pending_request()`, `resolve()` |
+| `PermissionPanel` | Pending approval, bounded preview, buttons, request/resolution focus callbacks | Widget protocol, `handle()`, `focus_target`, `has_pending_request()`, `resolve()` |
 | `StatusState` | Status messages and exit/persistence-failure flags | Used inside the bottom area |
 
 `InputPanel` knows nothing about permissions or queued inputs. The bottom area
@@ -69,8 +69,8 @@ def __pt_container__(self) -> Container: ...
 ```
 
 `WidgetEvent` is `prompt_toolkit.utils.Event`, distinguished from application
-`Event` values. Construct it with the component as its sender. A parent subscribes
-with `child.on_change += self._child_changed`. The hook receives the changed
+`ApplicationEvent` values. Construct it with the component as its sender. A parent subscribes
+with `child.on_change += self._child_changed`. The callback receives the changed
 component, not an application event or an action payload.
 
 `__pt_container__` returns the component's existing root container. This lets
@@ -78,7 +78,7 @@ parents use components directly in `HSplit` and `ConditionalContainer`, without
 accessing `.editor`, `.dialog`, or other grandchildren. This follows
 [prompt-toolkit's documented widget composition interface](https://python-prompt-toolkit.readthedocs.io/en/stable/pages/full_screen_apps.html#the-layout).
 
-Event-consuming components also implement `handle(event: Event) -> None`.
+Event-consuming components also implement `handle(event: ApplicationEvent) -> None`.
 Leaf controls that do not consume application events need no empty handler.
 State reducers may return a change flag internally; parents observe widgets
 through `on_change` instead of aggregating those flags.
@@ -108,7 +108,7 @@ widgets use composition; they do not inherit from `UIControl` or `Container`.
 prompt-toolkit's `Event` utility, but subscribing to it and requesting a repaint
 are our responsibilities. This differs from `Buffer.on_text_changed`, an event
 provided and fired by the framework. Application events imported from
-`alpha_forge.events` are a separate system again.
+`alpha_forge.application.events` are a separate system again.
 
 Callback method names such as `render_request` and `vertical_scroll` are ours;
 they work because we pass them to framework parameters. Conversely,
@@ -121,11 +121,13 @@ are called by our code. `create_content` builds all renderable history lines;
 handler returns `None` to consume an event or `NotImplemented` to let its window
 try its fallback; this does not hand the event back to the terminal emulator.
 
-## Downward updates and upward hooks
+## Downward updates, upward callbacks, and widget notifications
 
 Application events take one path:
 
-1. The coordinator publishes an application event.
+1. The coordinator, query runner, or permission broker publishes an
+   `ApplicationEvent` through `ApplicationEventRouter`. Query progress and hook
+   contexts are translated at these application boundaries.
 2. The terminal forwards it to the history and bottom areas.
 3. The history area updates its history control/state. The bottom area updates
    queue state, status, and then permission state, in that order.
@@ -146,7 +148,7 @@ Actions use explicit callbacks wired by the immediate parent:
 - Approval/denial travels from permission panel through the same parent chain.
   Clicking a button does not clear the request; the coordinator's resolution
   event does that.
-- Permission focus hooks go through the bottom area to the terminal's
+- Permission focus callbacks go through the bottom area to the terminal's
   `Layout.focus()` call. Status and request state are updated before focus changes.
   New requests focus Deny; resolution events restore editor focus without
   modifying the draft. Existing cleanup behavior for failure/result events is

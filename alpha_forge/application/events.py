@@ -4,15 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from alpha_forge.events import Event
-from alpha_forge.hooks import PreToolExecution
+from alpha_forge.json_values import FrozenJsonObject
 from alpha_forge.projectors.ui_history import UiHistoryItem
-from alpha_forge.providers.base import ToolCall
-from alpha_forge.query.protocol import (
-    ProviderDeltaReceived,
-    ProviderRequestStarted,
-    ProviderResponseCompleted,
-)
+from alpha_forge.providers.base import ProviderDelta, ProviderOutput, ToolCall
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,8 +16,28 @@ class SessionView:
     items: tuple[UiHistoryItem, ...]
 
 
-class ApplicationEvent(Event):
+class ApplicationEvent:
     """Base for coordinator-to-presentation facts."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseStreamStarted(ApplicationEvent):
+    prompt_event_id: str
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseStreamUpdated(ApplicationEvent):
+    request_id: str
+    delta: ProviderDelta
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseStreamCompleted(ApplicationEvent):
+    """The complete response was received; persistence is still pending."""
+
+    request_id: str
+    output: ProviderOutput
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +63,9 @@ class ModelOutputRecorded(ApplicationEvent):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolStarted(ApplicationEvent):
+class ToolCallProcessingStarted(ApplicationEvent):
+    """Tool-call processing began; validation and approval may still be pending."""
+
     model_output_event_id: str
     call: ToolCall
 
@@ -64,7 +80,9 @@ class ToolResultRecorded(ApplicationEvent):
 @dataclass(frozen=True, slots=True)
 class ToolPermissionRequested(ApplicationEvent):
     request_id: str
-    event: PreToolExecution
+    call_id: str
+    tool_name: str
+    tool_input: FrozenJsonObject
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,15 +125,15 @@ __all__ = [
     "InputStarted",
     "ModelOutputRecorded",
     "PersistenceFailed",
-    "ProviderDeltaReceived",
-    "ProviderRequestStarted",
-    "ProviderResponseCompleted",
     "RequestFailed",
+    "ResponseStreamCompleted",
+    "ResponseStreamStarted",
+    "ResponseStreamUpdated",
     "SessionView",
     "SessionViewChanged",
     "StatusChanged",
+    "ToolCallProcessingStarted",
     "ToolPermissionRequested",
     "ToolPermissionResolved",
     "ToolResultRecorded",
-    "ToolStarted",
 ]

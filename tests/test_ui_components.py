@@ -17,9 +17,9 @@ from alpha_forge.application.events import (
     InputQueued,
     InputStarted,
     PersistenceFailed,
-    ProviderDeltaReceived,
-    ProviderRequestStarted,
     RequestFailed,
+    ResponseStreamStarted,
+    ResponseStreamUpdated,
     SessionView,
     SessionViewChanged,
     ToolPermissionRequested,
@@ -119,10 +119,10 @@ class TerminalBehaviorTests(unittest.TestCase):
     def test_clipboard_contains_only_committed_text(self):
         self.publish_history("hello 世界")
         self.coordinator.event_router.publish(
-            ProviderRequestStarted("prompt", "request")
+            ResponseStreamStarted("prompt", "request")
         )
         self.coordinator.event_router.publish(
-            ProviderDeltaReceived("request", TextDelta("draft"))
+            ResponseStreamUpdated("request", TextDelta("draft"))
         )
         self.output.write_raw = Mock()
         self.output.flush = Mock()
@@ -152,10 +152,10 @@ class TerminalBehaviorTests(unittest.TestCase):
 
     def test_persistence_failure_keeps_stream_preview_and_halts_status(self):
         self.coordinator.event_router.publish(
-            ProviderRequestStarted("prompt", "request")
+            ResponseStreamStarted("prompt", "request")
         )
         self.coordinator.event_router.publish(
-            ProviderDeltaReceived("request", TextDelta("draft"))
+            ResponseStreamUpdated("request", TextDelta("draft"))
         )
         self.coordinator.event_router.publish(PersistenceFailed("query", "disk full"))
         self.assertEqual(
@@ -197,15 +197,14 @@ class TerminalBehaviorTests(unittest.TestCase):
         self.assertEqual(self.ui.bottom_area.status_message, "Ready")
 
     def test_permission_request_and_resolution_are_ephemeral(self) -> None:
-        lifecycle = PreToolExecution(
+        request = ToolPermissionRequested(
+            request_id="request",
             call_id="call",
             tool_name="bash",
             tool_input=FrozenJsonObject({"cmd": "pwd"}),
         )
 
-        self.coordinator.event_router.publish(
-            ToolPermissionRequested("request", lifecycle)
-        )
+        self.coordinator.event_router.publish(request)
 
         self.assertEqual(
             self.ui.bottom_area.permission_panel.pending_request.request_id, "request"
@@ -221,10 +220,10 @@ class TerminalBehaviorTests(unittest.TestCase):
 
     def test_request_failure_clears_ephemeral_draft(self) -> None:
         self.coordinator.event_router.publish(
-            ProviderRequestStarted("prompt", "request")
+            ResponseStreamStarted("prompt", "request")
         )
         self.coordinator.event_router.publish(
-            ProviderDeltaReceived("request", TextDelta("partial"))
+            ResponseStreamUpdated("request", TextDelta("partial"))
         )
         self.coordinator.event_router.publish(RequestFailed("boom"))
         self.assertEqual(self.ui.history_area.control.state.active_text(), "")
@@ -458,14 +457,13 @@ class TerminalBehaviorTests(unittest.TestCase):
                         self.ui.bottom_area.queued_inputs.pending_inputs, []
                     )
 
-                lifecycle = PreToolExecution(
+                request = ToolPermissionRequested(
+                    request_id="request",
                     call_id="call",
                     tool_name="bash",
                     tool_input=FrozenJsonObject({"cmd": "pwd"}),
                 )
-                self.coordinator.event_router.publish(
-                    ToolPermissionRequested("request", lifecycle)
-                )
+                self.coordinator.event_router.publish(request)
                 self.ui.bottom_area.input_panel.editor.text = "/he"
                 self.publish_history("\n".join(str(i) for i in range(100)))
                 self.ui.history_area.control.create_content(80, 4)

@@ -6,23 +6,23 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import cast
 
-from alpha_forge.hooks.events import LifecycleEvent, PreToolExecution
+from alpha_forge.hooks.events import HookContext, PreToolExecution
 
 
 @dataclass(frozen=True, slots=True)
-class HookMatcher[EventType: LifecycleEvent]:
+class HookMatcher[EventType: HookContext]:
     """Match one lifecycle event type and an event-specific predicate."""
 
     event_type: type[EventType]
     predicate: Callable[[EventType], bool]
 
-    def matches(self, event: LifecycleEvent) -> bool:
+    def matches(self, event: HookContext) -> bool:
         return isinstance(event, self.event_type) and self.predicate(
             cast(EventType, event)
         )
 
 
-def match_lifecycle[EventType: LifecycleEvent](
+def match_lifecycle[EventType: HookContext](
     event_type: type[EventType],
     predicate: Callable[[EventType], bool] | None = None,
 ) -> HookMatcher[EventType]:

@@ -19,11 +19,11 @@ from alpha_forge.application.events import (
 )
 from alpha_forge.application.permissions import PermissionBroker
 from alpha_forge.application.query_runner import QueryRunner
+from alpha_forge.application.router import ApplicationEventRouter
 from alpha_forge.application.views import publish_session_view, session_view
 from alpha_forge.config import Config
 from alpha_forge.context.pipeline import ContextPipeline
 from alpha_forge.context.tool_result_budget import ToolResultBudgetPolicy
-from alpha_forge.events import EventRouter
 from alpha_forge.hooks import (
     Hook,
     HookRegistry,
@@ -93,7 +93,7 @@ class ApplicationCoordinator:
         self.provider = provider or OpenAIChatAdapter(config)
         self.command_handler = SlashCommandHandler()
         self.session = session or Session.create()
-        self.event_router = EventRouter()
+        self.event_router = ApplicationEventRouter()
         self._permission_broker = PermissionBroker(self.event_router)
         self.hook_registry = hook_registry or HookRegistry()
         self.hook_registry.register(
