@@ -1,85 +1,72 @@
-# Async Coroutines in Python — Core Principles
+# Python Async Stack — Reference Map
 
-## What is a Coroutine?
+For the complete beginner course, start with the [reading guide](README.md). This page summarizes ownership and contracts across the stack.
 
-A **coroutine** is a special type of function that can **suspend its execution** at a point and later **resume** from where it left off, while allowing other tasks to run in the meantime.
+## Owners and exposed contracts
 
-In Python, coroutines are defined with `async def` and use `await` to yield control.
+A **protocol** is an agreement about methods, inputs, outputs, and behavior. A **runtime** supplies the machinery that drives execution using those agreements.
 
-## The Key Idea: Cooperative Multitasking
+| Layer | Building block | Exposed contract | Owns |
+| --- | --- | --- | --- |
+| Python language | Generator | `next`, `send`, `throw`, `close`; yields and final return | Resumable execution state |
+| Python language | Native coroutine | `send`, `throw`, `close`; usable with `await` | Locals, execution position, await chain |
+| Python language | Custom awaitable | `__await__()` returns an iterator | Delegation to an underlying operation |
+| Python language | Async iterator | `__aiter__`, awaitable `__anext__`, `StopAsyncIteration` | Repeated asynchronous item production |
+| Python language | Async context manager | Awaitable `__aenter__` and `__aexit__` | Entry and exit behavior for a scope |
+| `asyncio` | Future | Await, outcome setters, completion callbacks, state inspection | One eventual result, exception, or cancelled state |
+| `asyncio` | Task | Await, cancellation, outcome inspection | Driving a coroutine and tracking its wait |
+| `asyncio` or compatible implementation | Event loop | Callback scheduling, timers, factories, I/O APIs | When callbacks run and how external events enter Python |
+| `asyncio` | Runner | `asyncio.run()` / `asyncio.Runner` | Top-level loop lifecycle and shutdown |
+| `asyncio` | TaskGroup | Async scope and child creation | Child lifetime and failure propagation |
+| `asyncio` | Locks, Events, semaphores, queues | Cooperative acquisition, notification, item transfer | Coordination among Tasks |
+| Operating system | I/O and execution facilities | Readiness/completion notifications, threads, processes | External operations and worker execution |
 
-Unlike threads (preemptive multitasking), coroutines use **cooperative multitasking** — the coroutine itself decides when to pause (`await`) and let others run. This avoids race conditions and locking complexity in single-threaded code.
+The event loop is part of asyncio's architecture, not a separate language feature. The public methods allow compatible implementations. A valid Python awaitable must also yield signals understood by its chosen runtime.
 
-## How It Works Under the Hood
+## The resume–yield contract
 
-1. **Event Loop** — The central scheduler that orchestrates all coroutines. It maintains a queue of tasks.
+Calling a coroutine function creates a new coroutine object without running its body. A driver starts it with `.send(None)`. It then observes one of three outcomes:
 
-2. **Await Points** — When a coroutine hits `await`, it **suspends** and returns control to the event loop. The event loop can then run another ready coroutine.
+| Outcome | What the driver sees |
+| --- | --- |
+| Suspension | The send call returns a yielded object |
+| Successful completion | `StopIteration` carries the coroutine's return value |
+| Failure | An exception escapes the send call |
 
-3. **Future / Awaitable** — `await` expects an **awaitable** object (coroutine, Future, Task). When awaited, the event loop checks: is the result ready? If yes, continue immediately; if no, suspend and register a callback to wake up when done.
+An `await` delegates execution to the awaited object. A yield at the bottom of the chain propagates to the driver, preserving the chain's execution states. An await that completes without yielding does not suspend. These mechanisms exist independently of asyncio. [Language contracts](https://docs.python.org/3.14/reference/datamodel.html#coroutines)
 
-### The Flow
+## The scheduling and completion contract
 
-```python
-async def fetch_data():
-    print("Start fetch")
-    result = await some_io_operation()  # << suspend here
-    print("Got result:", result)
-    return result
-
-# The event loop runs this:
-# 1. Execute "Start fetch"
-# 2. Hit await → suspend, let other tasks run
-# 3. When I/O completes → resume from await
-# 4. Print result, return
+```text
+Loop runs Task callback
+    → Task resumes coroutine
+        → coroutine awaits operation
+            → operation awaits pending Future
+                → Future yields through the chain
+    ← Task registers Future wake-up callback and returns
+Loop runs other work or waits for external events
+    → producer callback completes Future
+        → Future schedules wake-up through loop
+Loop runs wake-up callback
+    → Task resumes coroutine chain
+        → await produces a result or raises
 ```
 
-## Critical Distinctions
+The Future identifies a dependency; it does not perform I/O itself. An adapter, timer, or other producer completes it. The loop runs callbacks serially on its thread, and those callbacks must give control back before other work can run. Completion makes a waiting Task eligible to resume; it does not interrupt executing code.
 
-| Concept | Definition |
-|---------|------------|
-| **Coroutine** | An `async def` function; calling it returns a coroutine object, **not** the result. |
-| **Coroutine object** | Must be **awaited** or scheduled as a Task; otherwise it's just an unused object. |
-| **Task** | Wraps a coroutine into an independent unit of work scheduled on the event loop. |
-| **Future** | A low-level awaitable representing a result that will be available later. |
+CPython uses a private Task/Future handshake for pending waits. Its queue structures and coordination flags are implementation details. Applications use public await, callback, and loop APIs. [Future implementation](https://github.com/python/cpython/blob/3.14/Lib/asyncio/futures.py)
 
-## Why Not Just Threads?
+## Composition and ownership rules
 
-- **Single-threaded** → no GIL contention, no thread-safety nightmares for shared data.
-- **Lightweight** → coroutines have tiny memory overhead vs. OS threads.
-- **Explicit** → you see exactly where suspension points are (`await`), making control flow clear.
+- Directly awaiting a coroutine extends the current Task's execution chain.
+- Creating a Task gives a fresh coroutine independent scheduling; it does not create another thread.
+- Distinct coroutine objects have distinct execution states but can reference shared data.
+- A coroutine object represents one execution. A completed Task retains an outcome that can be awaited repeatedly.
+- Cancellation requests exception delivery; await completion to observe cleanup.
+- A TaskGroup owns related child work. Async iteration and async context management do not by themselves create child Tasks.
+- Cooperative scheduling allows shared-state races across suspension points. Locks and bounded queues address different coordination needs.
+- Blocking operations need an appropriate boundary, such as a worker thread for blocking I/O. Cancelling a wait does not forcibly stop worker execution.
 
-## Minimal Example
+## Where to look next
 
-```python
-import asyncio
-
-async def hello():
-    print("Hello")
-    await asyncio.sleep(1)   # suspend here, let others run
-    print("World")
-
-async def main():
-    await asyncio.gather(hello(), hello())
-
-asyncio.run(main())
-```
-
-Output:
-```
-Hello
-Hello
-(1 second pause)
-World
-World
-```
-
-Both `hello()` tasks run concurrently — the second begins while the first is sleeping.
-
-## Summary
-
-**Python coroutines** are a cooperative concurrency primitive that:
-- Suspend/resume execution at `await` points.
-- Run on a single-threaded event loop.
-- Enable high-concurrency I/O without threads.
-- Are explicit and lightweight.
+Use the [numbered reading path](README.md#reading-order) for runnable demonstrations and explanations of each contract. The chapters distinguish public behavior from CPython implementation details and include links to the corresponding official references.
