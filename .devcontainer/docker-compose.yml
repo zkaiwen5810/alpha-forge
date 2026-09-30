@@ -41,7 +41,7 @@ services:
 
   litellm-db:
     image: postgres:16
-    restart: unless-stopped
+    restart: on-failure
     environment:
       POSTGRES_DB: litellm
       POSTGRES_USER: llmproxy
