@@ -15,7 +15,7 @@ services:
       - alpha-forge-repo:/workspaces/alpha-forge
 
   litellm:
-    image: ghcr.io/berriai/litellm-database:v1.90.0
+    image: ghcr.io/berriai/litellm:v1.103.1
     command:
       - --config=/app/config.yaml
       - --port=4000
@@ -32,7 +32,7 @@ services:
       SPEND_LOG_QUEUE_POLL_INTERVAL: ${SPEND_LOG_QUEUE_POLL_INTERVAL:-0.25}
       SPEND_LOG_QUEUE_SIZE_THRESHOLD: ${SPEND_LOG_QUEUE_SIZE_THRESHOLD:-1}
     ports:
-      - "4000:4000"
+      - "127.0.0.1:14000:4000"
     volumes:
       - ./litellm_config.yaml:/app/config.yaml:ro
     depends_on:
