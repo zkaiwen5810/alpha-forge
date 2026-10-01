@@ -4,8 +4,6 @@
   "name": "Alpha-Forge",
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
-  // Allow bubblewrap to create namespaces for the nested sandbox.
-  "runArgs": ["--security-opt=seccomp=unconfined"],
   "runServices": ["app", "litellm", "litellm-db"],
   "workspaceFolder": "/workspaces/alpha-forge",
 

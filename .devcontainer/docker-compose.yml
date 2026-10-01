@@ -5,6 +5,8 @@ services:
       context: .
       dockerfile: Dockerfile
     command: sleep infinity
+    security_opt:
+      - seccomp=unconfined
     env_file:
       - path: app.env
         required: false
