@@ -40,6 +40,8 @@ RUN mkdir -p /etc/apt/keyrings \
 # npm/pnpm/yarn/corepack
 ENV NPM_CONFIG_REGISTRY=https://registry.npmmirror.com/
 
+RUN npm config set registry "$NPM_CONFIG_REGISTRY" --location=global
+
 # pip source mirror switch
 ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ENV PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
