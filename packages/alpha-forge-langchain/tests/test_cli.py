@@ -32,7 +32,11 @@ class CliTests(unittest.TestCase):
             entry = ["-m", "alpha_forge_langchain"]
         return subprocess.run(
             [sys.executable, *entry, "--database", str(self.database), *arguments],
-            env=self.environment, capture_output=True, text=True, timeout=15,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
         )
 
     def test_commands_across_processes(self):
@@ -50,9 +54,15 @@ class CliTests(unittest.TestCase):
             self.assertEqual(sent.stdout, "offline answer\n")
         history = self.invoke("history", conversation)
         self.assertEqual(history.returncode, 0, history.stderr)
-        self.assertEqual([m["content"] for m in json.loads(history.stdout)], [
-            "first", "offline answer", "second", "offline answer",
-        ])
+        self.assertEqual(
+            [m["content"] for m in json.loads(history.stdout)],
+            [
+                "first",
+                "offline answer",
+                "second",
+                "offline answer",
+            ],
+        )
 
     def test_errors_and_no_secret_flag(self):
         result = self.invoke("history", "unknown")
@@ -69,23 +79,48 @@ class CliTests(unittest.TestCase):
         result = self.invoke("--api-key", "not-a-key", "new")
         self.assertEqual(result.returncode, 2)
 
+    def test_interactive_commands_require_a_terminal(self):
+        for arguments in [(), ("chat",), ("chat", "existing")]:
+            with self.subTest(arguments=arguments):
+                result = self.invoke(*arguments)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("requires a terminal", result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(self.database.exists())
+
     def test_abrupt_process_exit_restores_last_completed_turn(self):
         crashed = subprocess.run(
-            [sys.executable, str(Path(__file__).with_name("crash_fixture.py")), str(self.database)],
-            env=self.environment, capture_output=True, text=True, timeout=15,
+            [
+                sys.executable,
+                str(Path(__file__).with_name("crash_fixture.py")),
+                str(self.database),
+            ],
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
         )
         self.assertEqual(crashed.returncode, 23, crashed.stderr)
         conversation = crashed.stdout.strip()
         restored = self.invoke("history", conversation)
         self.assertEqual(restored.returncode, 0, restored.stderr)
         self.assertIn("Unfinished work excluded", restored.stderr)
-        self.assertEqual([m["content"] for m in json.loads(restored.stdout)], ["first", "baseline"])
+        self.assertEqual(
+            [m["content"] for m in json.loads(restored.stdout)], ["first", "baseline"]
+        )
         sent = self.invoke("send", conversation, "fresh", offline=True)
         self.assertEqual(sent.returncode, 0, sent.stderr)
         history = self.invoke("history", conversation)
-        self.assertEqual([m["content"] for m in json.loads(history.stdout)], [
-            "first", "baseline", "fresh", "offline answer",
-        ])
+        self.assertEqual(
+            [m["content"] for m in json.loads(history.stdout)],
+            [
+                "first",
+                "baseline",
+                "fresh",
+                "offline answer",
+            ],
+        )
 
     def test_busy_database_across_processes(self):
         import asyncio
@@ -95,6 +130,7 @@ class CliTests(unittest.TestCase):
                 result = await asyncio.to_thread(self.invoke, "new")
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("database is in use", result.stderr)
+
         asyncio.run(hold())
         self.assertEqual(self.invoke("new").returncode, 0)
 
@@ -103,9 +139,13 @@ class CliTests(unittest.TestCase):
 
         async def prepare():
             async with AgentRuntime(self.database) as runtime:
-                conversation = await runtime.create_conversation()
-                await runtime._store.begin(await runtime.restore_conversation(conversation))
+                conversation = await runtime.acreate_conversation()
+                assert runtime._conversation_store is not None
+                await runtime._conversation_store.abegin(
+                    await runtime.arestore_conversation(conversation)
+                )
                 return conversation
+
         conversation = asyncio.run(prepare())
         result = self.invoke("history", conversation)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -118,7 +158,11 @@ class CliTests(unittest.TestCase):
         from alpha_forge_langchain import defaults
 
         with patch.dict(os.environ, {"XDG_DATA_HOME": self.temporary.name}):
-            self.assertEqual(database_path(), Path(self.temporary.name) / "alpha-forge-langchain/conversations.sqlite3")
+            self.assertEqual(
+                database_path(),
+                Path(self.temporary.name)
+                / "alpha-forge-langchain/conversations.sqlite3",
+            )
         self.assertEqual(defaults.BASE_URL, "http://litellm:4000/v1")
 
 

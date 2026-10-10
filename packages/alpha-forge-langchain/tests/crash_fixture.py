@@ -7,17 +7,23 @@ from unittest.mock import patch
 
 from alpha_forge_langchain import AgentRuntime
 from langchain_core.messages import AIMessage
-from test_runtime import ScriptedModel
+from test_runtime import ScriptedModel, aconsume
 
 
 async def main():
-    model = ScriptedModel(responses=[AIMessage(content="baseline"), AIMessage(content="unpromoted")])
+    model = ScriptedModel(
+        responses=[AIMessage(content="baseline"), AIMessage(content="unpromoted")]
+    )
     async with AgentRuntime(sys.argv[1], model=model) as runtime:
-        conversation = await runtime.create_conversation()
-        await runtime.send(conversation, "first")
+        conversation = await runtime.acreate_conversation()
+        await aconsume(runtime, conversation, "first")
         print(conversation, flush=True)
-        with patch.object(runtime._store, "promote", side_effect=lambda *args: os._exit(23)):
-            await runtime.send(conversation, "abandoned")
+        with patch.object(
+            runtime._conversation_store,
+            "apromote",
+            side_effect=lambda *args: os._exit(23),
+        ):
+            await aconsume(runtime, conversation, "abandoned")
 
 
 asyncio.run(main())

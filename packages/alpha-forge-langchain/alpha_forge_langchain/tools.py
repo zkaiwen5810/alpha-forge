@@ -17,15 +17,17 @@ _BINARY = {
 }
 
 
-def _bounded(value: int | float) -> int | float:
+def _bounded(value: float) -> int | float:
     if isinstance(value, complex) or abs(value) > 1e100 or not math.isfinite(value):
         raise ValueError("result is too large or non-finite")
     return value
 
 
 def _evaluate(node: ast.AST) -> int | float:
-    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
-        return _bounded(node.value)
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return _bounded(value)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
         number = _evaluate(node.operand)
         return _bounded(-number if isinstance(node.op, ast.USub) else number)

@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import aclosing
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
@@ -43,14 +44,34 @@ class ScriptedModel(BaseChatModel):
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         """Override BaseChatModel._agenerate using the same offline response script."""
-        return self._generate(messages, stop, run_manager, **kwargs)
+        return self._generate(
+            messages, stop, run_manager.get_sync() if run_manager else None, **kwargs
+        )
+
+
+async def aconsume(runtime, conversation_id, input):
+    """Collect committed values in tests without a second runtime execution API."""
+    output = None
+    async with aclosing(runtime.asend(conversation_id, input)) as stream:
+        async for part in stream:
+            if part["type"] == "values":
+                output = part["data"]
+    if output is None:
+        raise AssertionError("no committed values")
+    return output
 
 
 def call(name="calculator", arguments=None, call_id="call-1"):
-    return AIMessage(content="", tool_calls=[{
-        "name": name, "args": arguments or {"expression": "(2 + 3) * 4"},
-        "id": call_id,
-    }])
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": name,
+                "args": arguments or {"expression": "(2 + 3) * 4"},
+                "id": call_id,
+            }
+        ],
+    )
 
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -64,31 +85,44 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.temporary.cleanup()
 
     async def test_multi_turn_tools_and_restart(self):
-        model = ScriptedModel(responses=[call(), AIMessage(content="20"), AIMessage(content="Again: 20")])
+        model = ScriptedModel(
+            responses=[call(), AIMessage(content="20"), AIMessage(content="Again: 20")]
+        )
         async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.create_conversation()
-            result = await runtime.send(conversation, "Calculate")
-            self.assertEqual(result.assistant_text, "20")
-            self.assertEqual([m.type for m in result.messages], ["human", "ai", "tool", "ai"])
-            self.assertEqual(result.messages[2].content, "20")
-            await runtime.send(conversation, "Repeat")
-            history = await runtime.history(conversation)
-            self.assertEqual([m.type for m in history], ["human", "ai", "tool", "ai", "human", "ai"])
-            self.assertEqual([m.content for m in model.seen[-1][1:]], [m.content for m in history[:-1]])
+            conversation = await runtime.acreate_conversation()
+            result = await aconsume(runtime, conversation, "Calculate")
+            self.assertEqual(result["messages"][-1].text, "20")
+            self.assertEqual(
+                [m.type for m in result["messages"]], ["human", "ai", "tool", "ai"]
+            )
+            self.assertEqual(result["messages"][2].content, "20")
+            await aconsume(runtime, conversation, "Repeat")
+            history = await runtime.ahistory(conversation)
+            self.assertEqual(
+                [m.type for m in history], ["human", "ai", "tool", "ai", "human", "ai"]
+            )
+            self.assertEqual(
+                [m.content for m in model.seen[-1][1:]],
+                [m.content for m in history[:-1]],
+            )
             # Returned history/results must not expose persisted mutable objects.
-            result.messages[0].content = "mutated"
+            result["messages"][0].content = "mutated"
             history[0].content = "mutated"
-            self.assertEqual((await runtime.history(conversation))[0].content, "Calculate")
+            self.assertEqual(
+                (await runtime.ahistory(conversation))[0].content, "Calculate"
+            )
         next_model = ScriptedModel(responses=[AIMessage(content="Still 20")])
         async with AgentRuntime(self.database, model=next_model) as runtime:
-            info = await runtime.restore_conversation(conversation)
+            info = await runtime.arestore_conversation(conversation)
             self.assertFalse(info.unfinished_work_excluded)
             self.assertEqual(next_model.seen, [])
-            self.assertEqual(len(await runtime.history(conversation)), 6)
-            result = await runtime.send(conversation, "Remember?")
-            self.assertEqual(len(next_model.seen[0]), 8)  # system + six saved + new user
-            self.assertEqual(result.assistant_text, "Still 20")
-            self.assertEqual(len(result.messages), 2)
+            self.assertEqual(len(await runtime.ahistory(conversation)), 6)
+            result = await aconsume(runtime, conversation, "Remember?")
+            self.assertEqual(
+                len(next_model.seen[0]), 8
+            )  # system + six saved + new user
+            self.assertEqual(result["messages"][-1].text, "Still 20")
+            self.assertEqual(len(result["messages"]), 8)
 
     async def test_injected_tool_and_error_result(self):
         @tool
@@ -96,18 +130,22 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             """Raise an ordinary tool failure."""
             raise ValueError(f"cannot process {value}")
 
-        model = ScriptedModel(responses=[
-            call("explode", {"value": "test"}), AIMessage(content="Tool failed"),
-            call(arguments={"expression": "1 / 0"}, call_id="call-2"), AIMessage(content="Division failed"),
-        ])
+        model = ScriptedModel(
+            responses=[
+                call("explode", {"value": "test"}),
+                AIMessage(content="Tool failed"),
+                call(arguments={"expression": "1 / 0"}, call_id="call-2"),
+                AIMessage(content="Division failed"),
+            ]
+        )
         async with AgentRuntime(self.database, model=model, tools=[explode]) as runtime:
-            conversation = await runtime.create_conversation()
-            result = await runtime.send(conversation, "Use custom tool")
-            self.assertEqual(result.messages[2].status, "error")
-            self.assertIn("cannot process test", result.messages[2].content)
-            result = await runtime.send(conversation, "Divide")
-            self.assertEqual(result.messages[2].status, "error")
-            self.assertEqual(result.messages[2].tool_call_id, "call-2")
+            conversation = await runtime.acreate_conversation()
+            result = await aconsume(runtime, conversation, "Use custom tool")
+            self.assertEqual(result["messages"][2].status, "error")
+            self.assertIn("cannot process test", result["messages"][2].content)
+            result = await aconsume(runtime, conversation, "Divide")
+            self.assertEqual(result["messages"][-2].status, "error")
+            self.assertEqual(result["messages"][-2].tool_call_id, "call-2")
 
     async def test_failures_restore_completed_head_without_retry(self):
         actions = []
@@ -118,141 +156,226 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             actions.append(value)
             return "recorded"
 
-        model = ScriptedModel(responses=[
-            AIMessage(content="baseline"), call("record", {"value": "once"}), RuntimeError("provider failed"),
-        ])
+        model = ScriptedModel(
+            responses=[
+                AIMessage(content="baseline"),
+                call("record", {"value": "once"}),
+                RuntimeError("provider failed"),
+            ]
+        )
         async with AgentRuntime(self.database, model=model, tools=[record]) as runtime:
-            conversation = await runtime.create_conversation()
-            await runtime.send(conversation, "First")
-            head = (await runtime.restore_conversation(conversation)).checkpoint_id
+            conversation = await runtime.acreate_conversation()
+            await aconsume(runtime, conversation, "First")
+            head = (await runtime.arestore_conversation(conversation)).checkpoint_id
             with self.assertRaisesRegex(RuntimeError, "provider failed"):
-                await runtime.send(conversation, "Unfinished")
+                await aconsume(runtime, conversation, "Unfinished")
             self.assertEqual(actions, ["once"])
-            self.assertEqual((await runtime.restore_conversation(conversation)).checkpoint_id, head)
+            self.assertEqual(
+                (await runtime.arestore_conversation(conversation)).checkpoint_id, head
+            )
         model = ScriptedModel(responses=[AIMessage(content="fresh")])
         async with AgentRuntime(self.database, model=model, tools=[record]) as runtime:
-            self.assertTrue((await runtime.restore_conversation(conversation)).unfinished_work_excluded)
+            self.assertTrue(
+                (
+                    await runtime.arestore_conversation(conversation)
+                ).unfinished_work_excluded
+            )
             self.assertEqual(model.seen, [])
-            self.assertEqual([m.content for m in await runtime.history(conversation)], ["First", "baseline"])
-            await runtime.send(conversation, "New prompt")
+            self.assertEqual(
+                [m.content for m in await runtime.ahistory(conversation)],
+                ["First", "baseline"],
+            )
+            await aconsume(runtime, conversation, "New prompt")
             self.assertEqual(actions, ["once"])
-            self.assertEqual([m.content for m in model.seen[0]], [
-                "You are Alpha Forge, a concise and helpful assistant.", "First", "baseline", "New prompt",
-            ])
-            self.assertFalse((await runtime.restore_conversation(conversation)).unfinished_work_excluded)
+            self.assertEqual(
+                [m.content for m in model.seen[0]],
+                [
+                    "You are Alpha Forge, a concise and helpful assistant.",
+                    "First",
+                    "baseline",
+                    "New prompt",
+                ],
+            )
+            self.assertFalse(
+                (
+                    await runtime.arestore_conversation(conversation)
+                ).unfinished_work_excluded
+            )
 
     async def test_failed_first_turn_gets_empty_history_and_fresh_thread(self):
-        model = ScriptedModel(responses=[RuntimeError("failed"), AIMessage(content="new")])
+        model = ScriptedModel(
+            responses=[RuntimeError("failed"), AIMessage(content="new")]
+        )
         async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.create_conversation()
+            conversation = await runtime.acreate_conversation()
             with self.assertRaises(RuntimeError):
-                await runtime.send(conversation, "old")
-            abandoned_thread = (await runtime.restore_conversation(conversation)).thread_id
-            self.assertEqual(await runtime.history(conversation), [])
-            await runtime.send(conversation, "fresh")
-            self.assertNotEqual((await runtime.restore_conversation(conversation)).thread_id, abandoned_thread)
+                await aconsume(runtime, conversation, "old")
+            abandoned_thread = (
+                await runtime.arestore_conversation(conversation)
+            ).thread_id
+            self.assertEqual(await runtime.ahistory(conversation), [])
+            await aconsume(runtime, conversation, "fresh")
+            self.assertNotEqual(
+                (await runtime.arestore_conversation(conversation)).thread_id,
+                abandoned_thread,
+            )
             self.assertEqual([m.content for m in model.seen[-1][1:]], ["fresh"])
 
     async def test_limit_and_budget_reset(self):
-        model = ScriptedModel(responses=[*[call(call_id=f"call-{i}") for i in range(10)], AIMessage(content="recovered")])
+        model = ScriptedModel(
+            responses=[
+                *[call(call_id=f"call-{i}") for i in range(10)],
+                AIMessage(content="recovered"),
+            ]
+        )
         async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.create_conversation()
+            conversation = await runtime.acreate_conversation()
             with self.assertRaisesRegex(Exception, "limit"):
-                await runtime.send(conversation, "loop")
+                await aconsume(runtime, conversation, "loop")
             self.assertEqual(len(model.seen), 10)
-            self.assertEqual(await runtime.history(conversation), [])
-            await runtime.send(conversation, "fresh")
+            self.assertEqual(await runtime.ahistory(conversation), [])
+            await aconsume(runtime, conversation, "fresh")
             self.assertEqual(len(model.seen), 11)
 
     async def test_promotion_failure_excludes_finished_unpromoted_checkpoint(self):
-        model = ScriptedModel(responses=[AIMessage(content="baseline"), AIMessage(content="not promoted")])
+        model = ScriptedModel(
+            responses=[AIMessage(content="baseline"), AIMessage(content="not promoted")]
+        )
         async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.create_conversation()
-            await runtime.send(conversation, "first")
-            with patch.object(runtime._store, "promote", side_effect=sqlite3.OperationalError("disk failed")):
-                with self.assertRaises(PersistenceError):
-                    await runtime.send(conversation, "second")
+            conversation = await runtime.acreate_conversation()
+            await aconsume(runtime, conversation, "first")
+            with (
+                patch.object(
+                    runtime._conversation_store,
+                    "apromote",
+                    side_effect=sqlite3.OperationalError("disk failed"),
+                ),
+                self.assertRaises(PersistenceError),
+            ):
+                await aconsume(runtime, conversation, "second")
             with self.assertRaisesRegex(PersistenceError, "reopen"):
-                await runtime.send(conversation, "blocked")
+                await aconsume(runtime, conversation, "blocked")
         async with AgentRuntime(self.database) as runtime:
-            info = await runtime.restore_conversation(conversation)
+            info = await runtime.arestore_conversation(conversation)
             self.assertTrue(info.unfinished_work_excluded)
-            self.assertEqual([m.content for m in await runtime.history(conversation)], ["first", "baseline"])
+            self.assertEqual(
+                [m.content for m in await runtime.ahistory(conversation)],
+                ["first", "baseline"],
+            )
 
     async def test_checkpoint_write_failure_preserves_head(self):
-        model = ScriptedModel(responses=[AIMessage(content="baseline"), AIMessage(content="next")])
+        model = ScriptedModel(
+            responses=[AIMessage(content="baseline"), AIMessage(content="next")]
+        )
         async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.create_conversation()
-            await runtime.send(conversation, "first")
-            with patch.object(runtime._saver, "aput", side_effect=sqlite3.OperationalError("checkpoint failed")):
-                with self.assertRaises(PersistenceError):
-                    await runtime.send(conversation, "second")
+            conversation = await runtime.acreate_conversation()
+            await aconsume(runtime, conversation, "first")
+            with (
+                patch.object(
+                    runtime._checkpointer,
+                    "aput",
+                    side_effect=sqlite3.OperationalError("checkpoint failed"),
+                ),
+                self.assertRaises(PersistenceError),
+            ):
+                await aconsume(runtime, conversation, "second")
         async with AgentRuntime(self.database) as runtime:
-            self.assertEqual([m.content for m in await runtime.history(conversation)], ["first", "baseline"])
+            self.assertEqual(
+                [m.content for m in await runtime.ahistory(conversation)],
+                ["first", "baseline"],
+            )
 
     async def test_cancelled_turn_excluded_and_resources_released(self):
         entered = asyncio.Event()
         never = asyncio.Event()
 
         class WaitingModel(ScriptedModel):
-            async def _agenerate(self, messages, **kwargs):
+            async def _agenerate(
+                self, messages, stop=None, run_manager=None, **kwargs
+            ) -> ChatResult:
                 """Override ScriptedModel._agenerate to pause until the test cancels it."""
                 entered.set()
                 await never.wait()
+                raise AssertionError("waiting model should always be cancelled")
 
         async with AgentRuntime(self.database, model=WaitingModel()) as runtime:
-            conversation = await runtime.create_conversation()
-            task = asyncio.create_task(runtime.send(conversation, "wait"))
+            conversation = await runtime.acreate_conversation()
+            task = asyncio.create_task(aconsume(runtime, conversation, "wait"))
             await asyncio.wait_for(entered.wait(), timeout=5)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
         async with AgentRuntime(self.database) as runtime:
-            self.assertTrue((await runtime.restore_conversation(conversation)).unfinished_work_excluded)
-            self.assertEqual(await runtime.history(conversation), [])
+            self.assertTrue(
+                (
+                    await runtime.arestore_conversation(conversation)
+                ).unfinished_work_excluded
+            )
+            self.assertEqual(await runtime.ahistory(conversation), [])
 
     async def test_isolation_validation_and_keyless_inspection(self):
         with patch.dict(os.environ, {}, clear=True):
             async with AgentRuntime(self.database) as runtime:
-                conversation = await runtime.create_conversation()
-                self.assertEqual(await runtime.history(conversation), [])
-                await runtime.restore_conversation(conversation)
+                conversation = await runtime.acreate_conversation()
+                self.assertEqual(await runtime.ahistory(conversation), [])
+                await runtime.arestore_conversation(conversation)
                 with self.assertRaisesRegex(ValueError, "OPENAI_API_KEY"):
-                    await runtime.send(conversation, "hello")
-                self.assertFalse((await runtime.restore_conversation(conversation)).unfinished_work_excluded)
+                    await aconsume(runtime, conversation, "hello")
+                self.assertFalse(
+                    (
+                        await runtime.arestore_conversation(conversation)
+                    ).unfinished_work_excluded
+                )
                 with self.assertRaises(ConversationNotFoundError):
-                    await runtime.history("missing")
+                    await runtime.ahistory("missing")
                 with self.assertRaises(ValueError):
-                    await runtime.send(conversation, "  ")
-        model = ScriptedModel(responses=[AIMessage(content="private"), AIMessage(content="separate")])
+                    await aconsume(runtime, conversation, "  ")
+        model = ScriptedModel(
+            responses=[AIMessage(content="private"), AIMessage(content="separate")]
+        )
         async with AgentRuntime(self.database, model=model) as runtime:
-            a, b = await runtime.create_conversation(), await runtime.create_conversation()
-            await runtime.send(a, "secret")
-            await runtime.send(b, "hello")
+            a, b = (
+                await runtime.acreate_conversation(),
+                await runtime.acreate_conversation(),
+            )
+            await aconsume(runtime, a, "secret")
+            await aconsume(runtime, b, "hello")
             self.assertEqual([m.content for m in model.seen[-1][1:]], ["hello"])
 
     async def test_lock_lifecycle_and_missing_checkpoint(self):
-        runtime = AgentRuntime(self.database, model=ScriptedModel(responses=[AIMessage(content="ok")]))
+        runtime = AgentRuntime(
+            self.database, model=ScriptedModel(responses=[AIMessage(content="ok")])
+        )
         with self.assertRaises(RuntimeError):
-            await runtime.create_conversation()
+            await runtime.acreate_conversation()
         async with runtime:
             with self.assertRaises(DatabaseBusyError):
                 async with AgentRuntime(self.database):
                     pass
-            conversation = await runtime.create_conversation()
-            await runtime.send(conversation, "hello")
-            with patch.object(runtime._saver, "aget_tuple", return_value=None):
-                with self.assertRaisesRegex(PersistenceError, "missing"):
-                    await runtime.restore_conversation(conversation)
+            conversation = await runtime.acreate_conversation()
+            await aconsume(runtime, conversation, "hello")
+            with (
+                patch.object(runtime._checkpointer, "aget_tuple", return_value=None),
+                self.assertRaisesRegex(PersistenceError, "missing"),
+            ):
+                await runtime.arestore_conversation(conversation)
         async with AgentRuntime(self.database) as runtime:
-            await runtime.restore_conversation(conversation)
+            await runtime.arestore_conversation(conversation)
 
     async def test_operations_are_serialized(self):
-        model = ScriptedModel(responses=[AIMessage(content="one"), AIMessage(content="two")])
+        model = ScriptedModel(
+            responses=[AIMessage(content="one"), AIMessage(content="two")]
+        )
         async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.create_conversation()
-            await asyncio.gather(runtime.send(conversation, "first"), runtime.send(conversation, "second"))
-            self.assertEqual([m.content for m in await runtime.history(conversation)], ["first", "one", "second", "two"])
+            conversation = await runtime.acreate_conversation()
+            await asyncio.gather(
+                aconsume(runtime, conversation, "first"),
+                aconsume(runtime, conversation, "second"),
+            )
+            self.assertEqual(
+                [m.content for m in await runtime.ahistory(conversation)],
+                ["first", "one", "second", "two"],
+            )
 
     async def test_real_openai_adapter_offline_and_client_cleanup(self):
         import json
@@ -265,13 +388,47 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         def respond(request):
             requests.append(request)
-            return httpx.Response(200, json={
-                "id": "chatcmpl-offline", "object": "chat.completion", "created": 0,
-                "model": "DeepSeek-V4-Flash", "choices": [{
-                    "index": 0, "message": {"role": "assistant", "content": "SDK response"},
-                    "finish_reason": "stop",
-                }], "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
-            })
+            chunks = []
+            for text, finish_reason in [
+                ("SDK ", None),
+                ("response", None),
+                ("", "stop"),
+            ]:
+                chunks.append(
+                    {
+                        "id": "chatcmpl-offline",
+                        "object": "chat.completion.chunk",
+                        "created": 0,
+                        "model": "DeepSeek-V4-Flash",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": text},
+                                "finish_reason": finish_reason,
+                            }
+                        ],
+                    }
+                )
+            chunks.append(
+                {
+                    "id": "chatcmpl-offline",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "DeepSeek-V4-Flash",
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 4,
+                        "completion_tokens": 2,
+                        "total_tokens": 6,
+                    },
+                }
+            )
+            content = "".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks)
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=content + "data: [DONE]\n\n",
+            )
 
         def sync_client(**kwargs):
             client = httpx.Client(transport=httpx.MockTransport(respond))
@@ -283,36 +440,52 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             clients.append(client)
             return AsyncOpenAI(**kwargs, http_client=client)
 
-        with patch.dict(os.environ, {
-            "OPENAI_API_KEY": "offline-not-a-real-key",
-            "OPENAI_BASE_URL": "https://ignored.example/v1",
-            "OPENAI_MODEL": "ignored-model",
-        }), patch("alpha_forge_langchain.runtime.OpenAI", side_effect=sync_client), patch(
-            "alpha_forge_langchain.runtime.AsyncOpenAI", side_effect=async_client,
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "offline-not-a-real-key",
+                    "OPENAI_BASE_URL": "https://ignored.example/v1",
+                    "OPENAI_MODEL": "ignored-model",
+                },
+            ),
+            patch("alpha_forge_langchain.runtime.OpenAI", side_effect=sync_client),
+            patch(
+                "alpha_forge_langchain.runtime.AsyncOpenAI",
+                side_effect=async_client,
+            ),
         ):
             async with AgentRuntime(self.database) as runtime:
-                conversation = await runtime.create_conversation()
-                result = await runtime.send(conversation, "hello")
-                self.assertEqual(result.assistant_text, "SDK response")
-                self.assertEqual(result.messages[-1].usage_metadata["total_tokens"], 6)
-                self.assertEqual(str(requests[0].url), "http://litellm:4000/v1/chat/completions")
+                conversation = await runtime.acreate_conversation()
+                result = await aconsume(runtime, conversation, "hello")
+                self.assertEqual(result["messages"][-1].text, "SDK response")
+                self.assertEqual(
+                    result["messages"][-1].usage_metadata["total_tokens"], 6
+                )
+                self.assertEqual(
+                    str(requests[0].url), "http://litellm:4000/v1/chat/completions"
+                )
                 payload = json.loads(requests[0].content)
                 self.assertEqual(payload["model"], "DeepSeek-V4-Flash")
+                self.assertTrue(payload["stream"])
                 self.assertEqual(payload["tools"][0]["function"]["name"], "calculator")
             self.assertTrue(all(client.is_closed for client in clients))
 
     async def test_completed_model_budget_resets_and_runtime_can_reopen(self):
-        model = ScriptedModel(responses=[
-            *[call(call_id=f"call-{i}") for i in range(9)],
-            AIMessage(content="ten calls"), AIMessage(content="next turn"),
-        ])
+        model = ScriptedModel(
+            responses=[
+                *[call(call_id=f"call-{i}") for i in range(9)],
+                AIMessage(content="ten calls"),
+                AIMessage(content="next turn"),
+            ]
+        )
         runtime = AgentRuntime(self.database, model=model)
         async with runtime:
-            conversation = await runtime.create_conversation()
-            await runtime.send(conversation, "ten")
+            conversation = await runtime.acreate_conversation()
+            await aconsume(runtime, conversation, "ten")
             self.assertEqual(len(model.seen), 10)
         async with runtime:
-            await runtime.send(conversation, "next")
+            await aconsume(runtime, conversation, "next")
             self.assertEqual(len(model.seen), 11)
 
 

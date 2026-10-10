@@ -7,9 +7,8 @@ import fcntl
 import os
 import sqlite3
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Self, TypedDict, cast
@@ -17,16 +16,19 @@ from typing import Self, TypedDict, cast
 import aiosqlite
 
 # LangChain's Checkpointer alias omits its generic parameter in this signature.
-from langchain.agents import create_agent  # pyright: ignore[reportUnknownVariableType]
+from langchain.agents import (  # pyright: ignore[reportUnknownVariableType]
+    AgentState,
+    create_agent,
+)
 from langchain.agents.middleware import ModelCallLimitMiddleware, wrap_tool_call
 from langchain.agents.middleware.model_call_limit import ModelCallLimitState
-from langchain.agents.middleware.types import ToolCallRequest
+from langchain.agents.middleware.types import OutputAgentState, ToolCallRequest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.types import Command
+from langgraph.types import Command, StreamPart
 from openai import AsyncOpenAI, OpenAI
 from pydantic import SecretStr
 
@@ -43,15 +45,8 @@ class PersistenceError(RuntimeError):
     """Conversation persistence failed or a completed checkpoint is missing."""
 
 
-@dataclass(frozen=True)
-class TurnResult:
-    conversation_id: str
-    assistant_text: str
-    messages: tuple[BaseMessage, ...]
-
-
 @wrap_tool_call(state_schema=ModelCallLimitState)
-async def _tool_errors(
+async def _atool_errors(
     request: ToolCallRequest,
     handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[object]]],
 ) -> ToolMessage | Command[object]:
@@ -74,9 +69,9 @@ class _ClientOptions(TypedDict):
     max_retries: int
 
 
-def _validate_prompt(value: object) -> str:
+def _validate_input(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ValueError("prompt must be a non-empty string")
+        raise ValueError("input must be a non-empty string")
     return value
 
 
@@ -101,8 +96,8 @@ class AgentRuntime:
             raise ValueError("tool names must be unique, including calculator")
         self._operations: asyncio.Lock = asyncio.Lock()
         self._stack: AsyncExitStack | None = None
-        self._saver: AsyncSqliteSaver | None = None
-        self._store: ConversationStore | None = None
+        self._checkpointer: AsyncSqliteSaver | None = None
+        self._conversation_store: ConversationStore | None = None
         self._halted: bool = False
 
     async def __aenter__(self) -> Self:
@@ -121,10 +116,10 @@ class AgentRuntime:
             connection = await stack.enter_async_context(
                 aiosqlite.connect(self.database)
             )
-            self._saver = AsyncSqliteSaver(connection)
-            await self._saver.setup()
-            self._store = ConversationStore(connection)
-            await self._store.setup()
+            self._checkpointer = AsyncSqliteSaver(connection)
+            await self._checkpointer.setup()
+            self._conversation_store = ConversationStore(connection)
+            await self._conversation_store.asetup()
             self._stack = stack
             self._halted = False
             return self
@@ -143,8 +138,8 @@ class AgentRuntime:
             if stack is not None:
                 await stack.aclose()
             self._model = self._provided_model
-            self._saver = None
-            self._store = None
+            self._checkpointer = None
+            self._conversation_store = None
 
     @asynccontextmanager
     async def _operation(self) -> AsyncGenerator[None]:
@@ -161,28 +156,30 @@ class AgentRuntime:
                 self._halted = True
                 raise PersistenceError(str(exc)) from exc
 
-    async def create_conversation(self) -> str:
+    async def acreate_conversation(self) -> str:
         async with self._operation():
-            assert self._store is not None
-            return await self._store.create(defaults.SYSTEM_PROMPT)
+            assert self._conversation_store is not None
+            return await self._conversation_store.acreate(defaults.SYSTEM_PROMPT)
 
-    async def restore_conversation(self, conversation_id: str) -> ConversationInfo:
+    async def arestore_conversation(self, conversation_id: str) -> ConversationInfo:
         async with self._operation():
-            assert self._store is not None
-            info = await self._store.get(conversation_id)
-            _ = await self._history(info)
+            assert self._conversation_store is not None
+            info = await self._conversation_store.aget(conversation_id)
+            _ = await self._ahistory(info)
             return info
 
-    async def history(self, conversation_id: str) -> list[BaseMessage]:
+    async def ahistory(self, conversation_id: str) -> list[BaseMessage]:
         async with self._operation():
-            assert self._store is not None
-            return await self._history(await self._store.get(conversation_id))
+            assert self._conversation_store is not None
+            return await self._ahistory(
+                await self._conversation_store.aget(conversation_id)
+            )
 
-    async def _history(self, info: ConversationInfo) -> list[BaseMessage]:
+    async def _ahistory(self, info: ConversationInfo) -> list[BaseMessage]:
         if info.checkpoint_id is None:
             return []
-        assert self._saver is not None
-        saved = await self._saver.aget_tuple(info.checkpoint_config())
+        assert self._checkpointer is not None
+        saved = await self._checkpointer.aget_tuple(info.checkpoint_config())
         if saved is None:
             raise PersistenceError("completed conversation checkpoint is missing")
         messages = cast(
@@ -190,7 +187,7 @@ class AgentRuntime:
         )
         return deepcopy(messages)
 
-    async def _get_model(self) -> BaseChatModel:
+    async def _aget_model(self) -> BaseChatModel:
         if self._model is None:
             key = os.environ.get("OPENAI_API_KEY")
             if not key:
@@ -219,42 +216,62 @@ class AgentRuntime:
             )
         return self._model
 
-    async def send(self, conversation_id: str, prompt: str) -> TurnResult:
-        prompt = _validate_prompt(prompt)
+    async def asend(
+        self, conversation_id: str, input: str
+    ) -> AsyncGenerator[StreamPart[AgentState[object], OutputAgentState[object]]]:
+        """Stream native messages/updates, then committed state as terminal values.
+
+        Consume inside ``contextlib.aclosing`` so stopping early releases the
+        operation lock and cancels unfinished graph work. Only the terminal
+        ``values`` part indicates that the conversation head was promoted.
+        """
+        input = _validate_input(input)
         async with self._operation():
-            assert self._store is not None
-            assert self._saver is not None
-            info = await self._store.get(conversation_id)
-            before = await self._history(info)
+            assert self._conversation_store is not None
+            assert self._checkpointer is not None
+            info = await self._conversation_store.aget(conversation_id)
+            await self._ahistory(info)
             agent = create_agent(
-                await self._get_model(),
+                await self._aget_model(),
                 tools=self._tools,
                 system_prompt=info.system_prompt,
-                checkpointer=self._saver,
+                checkpointer=self._checkpointer,
                 middleware=[
-                    _tool_errors,
+                    _atool_errors,
                     ModelCallLimitMiddleware(
                         run_limit=defaults.MAX_MODEL_CALLS,
                         exit_behavior="error",
                     ),
                 ],
             )
-            thread_id = await self._store.begin(info)
+            thread_id = await self._conversation_store.abegin(info)
             config = info.checkpoint_config()
             config.setdefault("configurable", {})["thread_id"] = thread_id
             config["recursion_limit"] = 100
-            # LangGraph's overload includes an unparameterized Command input.
-            output = await agent.ainvoke(  # pyright: ignore[reportUnknownMemberType]
-                {"messages": [HumanMessage(content=prompt)]},
-                config,
-                durability="sync",
+            # LangGraph annotates astream as AsyncIterator, but implements an
+            # async generator whose aclose is required for early-stop cleanup.
+            stream = cast(
+                AsyncGenerator[
+                    StreamPart[AgentState[object], OutputAgentState[object]]
+                ],
+                agent.astream(
+                    {"messages": [HumanMessage(content=input)]},
+                    config,
+                    stream_mode=["messages", "updates"],
+                    version="v2",
+                    durability="sync",
+                ),
             )
+            async with aclosing(stream):
+                async for part in stream:
+                    yield deepcopy(part)
             # No concurrent invocation exists, so latest is this invocation's tail,
             # including when it branched from an older completed checkpoint.
             snapshot = await agent.aget_state(
                 {"configurable": {"thread_id": thread_id}}
             )
-            messages = cast(list[BaseMessage], output["messages"])
+            values = cast(OutputAgentState[object], deepcopy(snapshot.values))
+            messages = values["messages"]
             final_message = messages[-1] if messages else None
             if (
                 snapshot.next
@@ -265,9 +282,7 @@ class AgentRuntime:
             checkpoint_id = cast(
                 str, snapshot.config.get("configurable", {})["checkpoint_id"]
             )
-            await self._store.promote(conversation_id, checkpoint_id)
-            return TurnResult(
-                conversation_id,
-                final_message.text,
-                tuple(deepcopy(messages[len(before) :])),
-            )
+            await self._conversation_store.apromote(conversation_id, checkpoint_id)
+        # The caller can inspect history at completion without deadlocking
+        # against a suspended iterator that still holds the operation lock.
+        yield {"type": "values", "ns": (), "data": values, "interrupts": ()}
