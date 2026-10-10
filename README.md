@@ -110,3 +110,10 @@ Create dependency-summary.md with that summary.
 ```
 
 Review the requested file write in the approval dialog and allow or deny it.
+
+## Standalone LangChain implementation
+
+The separate [LangChain package](packages/alpha-forge-langchain/README.md)
+implements a headless multi-turn agent from scratch, with a calculator, injectable
+tools, SQLite conversation persistence, and restoration to the last completed
+turn. It has its own installation and CLI and does not use this app's runtime.
