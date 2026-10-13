@@ -45,6 +45,129 @@ On a normal Future completion, the Task resumes with `.send(None)` and the Futur
 
 CPython recognizes correctly yielded asyncio Futures and a bare `None` yield, which requests another scheduled step. Unsupported signals fail. A pending Future from another loop is rejected. The private handshake is distinct from the public language-level awaitable contract. [Task implementation](https://github.com/python/cpython/blob/3.14/Lib/asyncio/tasks.py)
 
+## A runnable model of the handshake
+
+This standalone model connects the language-level await protocol from chapter 04 to the callback scheduling and completion mechanisms from chapters 05–06. These are teaching classes, not asyncio implementations. Their Future and Task use their own waiting protocol; do not mix them with asyncio objects.
+
+```python
+from collections import deque
+
+
+class Loop:
+    def __init__(self):
+        self.ready = deque()
+
+    def call_soon(self, callback, *args):
+        self.ready.append((callback, args))
+
+    def run(self):
+        while self.ready:
+            callback, args = self.ready.popleft()
+            callback(*args)
+
+
+class Future:
+    def __init__(self, loop):
+        self.loop = loop
+        self.done = False
+        self.value = None
+        self.callbacks = []
+
+    def add_done_callback(self, callback):
+        if self.done:
+            self.loop.call_soon(callback, self)
+        else:
+            self.callbacks.append(callback)
+
+    def set_result(self, value):
+        if self.done:
+            raise RuntimeError("Future already completed")
+
+        self.value = value
+        self.done = True
+        for callback in self.callbacks:
+            self.loop.call_soon(callback, self)
+        self.callbacks.clear()
+
+    def __await__(self):
+        if not self.done:
+            yield self  # Travels outward through the coroutine to the Task.
+        return self.value
+
+
+class Task:
+    def __init__(self, coroutine, loop):
+        self.coroutine = coroutine
+        loop.call_soon(self.step)
+
+    def step(self):
+        try:
+            future = self.coroutine.send(None)
+        except StopIteration as finished:
+            print("Task finished:", finished.value)
+        else:
+            future.add_done_callback(self.wakeup)
+
+    def wakeup(self, completed_future):
+        self.step()
+
+
+async def work(future):
+    print("Coroutine started")
+    value = await future
+    print("Coroutine resumed:", value)
+    return value * 2
+
+
+loop = Loop()
+future = Future(loop)
+task = Task(work(future), loop)
+
+
+def finish_operation():
+    print("Completing Future")
+    future.set_result(21)
+    print("set_result returned")
+
+
+loop.call_soon(finish_operation)
+loop.run()
+```
+
+Output:
+
+```text
+Coroutine started
+Completing Future
+set_result returned
+Coroutine resumed: 21
+Task finished: 42
+```
+
+There are two places where callbacks wait: the Future's callback list holds notifications waiting for completion; the loop's ready queue holds callbacks eligible to execute.
+
+| Moment | Loop's ready queue | Future's callback list |
+| --- | --- | --- |
+| Before `run()` | `task.step`, `finish_operation` | Empty |
+| After `task.step` suspends the coroutine | `finish_operation` | `task.wakeup` |
+| After `set_result(21)` | `task.wakeup` | Empty |
+| After `task.wakeup` finishes | Empty | Empty |
+
+The loop does not inspect the coroutine to determine whether it can continue. The Future's `set_result()` queues the wake-up callback. It returns before that callback executes, as the output shows.
+
+`self.wakeup` is a **bound method**: it remembers both the method's function and the Task instance to pass as `self`. The Future stores this callable, and the loop later calls it with the completed Future as its argument. Calling `task.wakeup(future)` is equivalent to calling `Task.wakeup(task, future)`.
+
+The wake-up callback is an ordinary method call, not a suspended execution. The previous `step()` call has returned. The Task still holds the coroutine object, which preserves the suspended execution state. A fresh call to `step()` invokes `.send(None)` on that same object. Inside `Future.__await__()`, execution continues after `yield self` and returns the stored value, so `await future` evaluates to `21`.
+
+```text
+Future stores bound wake-up callback
+    → callback remembers Task
+    → Task holds coroutine
+    → coroutine holds suspended execution state
+```
+
+This model omits exception propagation, cancellation, Task outcome storage, waiting-signal validation, timers, and OS waiting. Its loop exits when the ready queue is empty. A real event loop can wait for external events that make more callbacks ready; chapter 08 traces that I/O path.
+
 ## Execution timing
 
 With default scheduling, a new Task starts when the loop runs its callback. Optional eager execution can start it during creation. In either mode, awaiting an immediately completed operation need not give another Task a turn. `asyncio.sleep(0)` explicitly suspends to allow other work.

@@ -25,6 +25,8 @@ There are **14 topics**. The first four explain language building blocks without
 
 Read the numbered files in order. Each explains its own topic using concepts already introduced, with a short understanding check and answer. The [stack reference](async-coroutine-principles.md) is a compact recap after the course.
 
+To see chapters 02–07 working together, run the [minimal loop, Future, and Task model in chapter 07](07-tasks-and-scheduling.md#a-runnable-model-of-the-handshake). It shows where callbacks are stored and how a scheduled wake-up resumes a coroutine.
+
 ## Running the examples
 
 Use Python **3.11 or newer**. Each `python` code block is a standalone script unless explicitly described otherwise. Copy a block into a file and run `python3 example.py`. Examples need only the standard library; the I/O example uses a local socket pair, not an internet service.

@@ -47,6 +47,8 @@ Conceptually, a Future's await iterator yields the Future itself if it is pendin
 
 The important distinction is between the **yielded Future**, which tells the driver what to wait for, and the **stored result**, which the completed await returns. If the Future is already complete, its await iterator can return without yielding.
 
+Chapter 07's [runnable handshake model](07-tasks-and-scheduling.md#a-runnable-model-of-the-handshake) shows the callback list, loop queue, and coroutine driver together.
+
 ## Check your understanding
 
 **Does `future.result()` wait for completion?**
