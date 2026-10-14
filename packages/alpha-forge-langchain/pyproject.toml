@@ -5,8 +5,11 @@ description = "Async streaming LangChain terminal agent with persistent conversa
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "langchain>=1.0,<2",
-    "langchain-core>=1.0,<2",
+    "langchain>=1.4.5,<2",
+    "langchain-core>=1.6.10,<2",
+    "deepagents>=0.7.25,<0.8",
+    "langchain-community>=0.4.2,<0.5",
+    "aiohttp>=3.8.3,<4",
     "langchain-openai>=1.0,<2",
     "langgraph>=1.2.14,<2",
     "langgraph-checkpoint-sqlite>=3.0,<4",

@@ -6,7 +6,7 @@ import asyncio
 import fcntl
 import os
 import sqlite3
-from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -14,27 +14,31 @@ from types import TracebackType
 from typing import Self, TypedDict, cast
 
 import aiosqlite
+from aiohttp import ClientSession, ClientTimeout
 
 # LangChain's Checkpointer alias omits its generic parameter in this signature.
 from langchain.agents import (  # pyright: ignore[reportUnknownVariableType]
     AgentState,
     create_agent,
 )
-from langchain.agents.middleware import ModelCallLimitMiddleware, wrap_tool_call
-from langchain.agents.middleware.model_call_limit import ModelCallLimitState
-from langchain.agents.middleware.types import OutputAgentState, ToolCallRequest
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelCallLimitMiddleware,
+)
+from langchain.agents.middleware.types import OutputAgentState
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.types import Command, StreamPart
+from langgraph.types import StreamPart
 from openai import AsyncOpenAI, OpenAI
 from pydantic import SecretStr
 
 from . import defaults
+from .middleware import HostPathMiddleware, filesystem_middleware, tool_errors
 from .store import ConversationInfo, ConversationStore
-from .tools import calculator
+from .tools import calculator, web_fetch_tool
 
 
 class DatabaseBusyError(RuntimeError):
@@ -43,23 +47,6 @@ class DatabaseBusyError(RuntimeError):
 
 class PersistenceError(RuntimeError):
     """Conversation persistence failed or a completed checkpoint is missing."""
-
-
-@wrap_tool_call(state_schema=ModelCallLimitState)
-async def _atool_errors(
-    request: ToolCallRequest,
-    handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[object]]],
-) -> ToolMessage | Command[object]:
-    try:
-        return await handler(request)
-    # Normalize arbitrary exceptions from caller-supplied tools for the model.
-    except Exception as exc:  # noqa: BLE001
-        return ToolMessage(
-            content=f"error: {str(exc) or type(exc).__name__}",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-            status="error",
-        )
 
 
 class _ClientOptions(TypedDict):
@@ -90,10 +77,14 @@ class AgentRuntime:
         )
         self._provided_model: BaseChatModel | None = model
         self._model: BaseChatModel | None = model
-        self._tools: list[BaseTool] = [calculator, *tools]
-        names = [item.name for item in self._tools]
+        self.workspace = Path.cwd().resolve()
+        self._filesystem = filesystem_middleware(self.workspace)
+        self._host_paths = HostPathMiddleware(self.workspace)
+        self._web_fetch = web_fetch_tool()
+        self._tools: list[BaseTool] = [calculator, self._web_fetch, *tools]
+        names = [item.name for item in [*self._tools, *self._filesystem.tools]]
         if len(names) != len(set(names)):
-            raise ValueError("tool names must be unique, including calculator")
+            raise ValueError("tool names must be unique, including all built-in tools")
         self._operations: asyncio.Lock = asyncio.Lock()
         self._stack: AsyncExitStack | None = None
         self._checkpointer: AsyncSqliteSaver | None = None
@@ -120,6 +111,11 @@ class AgentRuntime:
             await self._checkpointer.setup()
             self._conversation_store = ConversationStore(connection)
             await self._conversation_store.asetup()
+            self._web_fetch.requests_wrapper.aiosession = (
+                await stack.enter_async_context(
+                    ClientSession(timeout=ClientTimeout(total=30.0))
+                )
+            )
             self._stack = stack
             self._halted = False
             return self
@@ -140,6 +136,7 @@ class AgentRuntime:
             self._model = self._provided_model
             self._checkpointer = None
             self._conversation_store = None
+            self._web_fetch.requests_wrapper.aiosession = None
 
     @asynccontextmanager
     async def _operation(self) -> AsyncGenerator[None]:
@@ -236,13 +233,20 @@ class AgentRuntime:
                 tools=self._tools,
                 system_prompt=info.system_prompt,
                 checkpointer=self._checkpointer,
-                middleware=[
-                    _atool_errors,
-                    ModelCallLimitMiddleware(
-                        run_limit=defaults.MAX_MODEL_CALLS,
-                        exit_behavior="error",
-                    ),
-                ],
+                # LangChain merges these state schemas at runtime; its invariant
+                # middleware state parameter cannot express a heterogeneous list.
+                middleware=cast(
+                    Sequence[AgentMiddleware[AgentState[object], None, object]],
+                    [
+                        tool_errors,
+                        self._host_paths,
+                        self._filesystem,
+                        ModelCallLimitMiddleware(
+                            run_limit=defaults.MAX_MODEL_CALLS,
+                            exit_behavior="error",
+                        ),
+                    ],
+                ),
             )
             thread_id = await self._conversation_store.abegin(info)
             config = info.checkpoint_config()

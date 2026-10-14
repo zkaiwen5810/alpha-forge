@@ -1,10 +1,21 @@
-"""Freshly implemented calculator; no application-runtime dependencies."""
+"""Standalone calculator and LangChain web-fetch tool definitions."""
 
 import ast
 import math
 import operator
 
+from langchain_community.tools.requests.tool import RequestsGetTool
+from langchain_community.utilities.requests import TextRequestsWrapper
 from langchain_core.tools import tool
+
+
+def web_fetch_tool() -> RequestsGetTool:
+    """Create the native GET tool; the runtime supplies its owned HTTP session."""
+    return RequestsGetTool(
+        requests_wrapper=TextRequestsWrapper(),
+        allow_dangerous_requests=True,
+    )
+
 
 _BINARY = {
     ast.Add: operator.add,

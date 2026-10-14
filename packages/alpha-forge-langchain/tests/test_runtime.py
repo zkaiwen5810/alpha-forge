@@ -24,6 +24,7 @@ from pydantic import Field
 class ScriptedModel(BaseChatModel):
     responses: list = Field(default_factory=list)
     seen: list = Field(default_factory=list)
+    bound_tools: list[str] = Field(default_factory=list)
 
     @property
     def _llm_type(self):
@@ -32,6 +33,7 @@ class ScriptedModel(BaseChatModel):
 
     def bind_tools(self, tools, **kwargs):
         """Override BaseChatModel.bind_tools; scripted responses specify tool calls."""
+        self.bound_tools = [item.name for item in tools]
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
@@ -188,13 +190,17 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             await aconsume(runtime, conversation, "New prompt")
             self.assertEqual(actions, ["once"])
             self.assertEqual(
-                [m.content for m in model.seen[0]],
+                [m.content for m in model.seen[0][1:]],
                 [
-                    "You are Alpha Forge, a concise and helpful assistant.",
                     "First",
                     "baseline",
                     "New prompt",
                 ],
+            )
+            self.assertTrue(
+                model.seen[0][0].text.startswith(
+                    "You are Alpha Forge, a concise and helpful assistant."
+                )
             )
             self.assertFalse(
                 (
@@ -468,7 +474,20 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 payload = json.loads(requests[0].content)
                 self.assertEqual(payload["model"], "DeepSeek-V4-Flash")
                 self.assertTrue(payload["stream"])
-                self.assertEqual(payload["tools"][0]["function"]["name"], "calculator")
+            self.assertEqual(
+                {item["function"]["name"] for item in payload["tools"]},
+                {
+                    "calculator",
+                    "ls",
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "glob",
+                    "grep",
+                    "execute",
+                    "requests_get",
+                },
+            )
             self.assertTrue(all(client.is_closed for client in clients))
 
     async def test_completed_model_budget_resets_and_runtime_can_reopen(self):

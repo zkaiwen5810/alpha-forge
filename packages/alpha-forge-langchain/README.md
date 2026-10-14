@@ -134,10 +134,67 @@ def uppercase(text: str) -> str:
 runtime = AgentRuntime("./conversations.sqlite3", tools=[uppercase])
 ```
 
-The built-in `calculator` supports bounded numeric arithmetic. Tool names must be
-unique, including `calculator`. Ordinary tool exceptions become error tool
+Tool names must be unique across all built-ins and supplied tools. Ordinary tool exceptions become error tool
 messages so the model can respond. Supply tool handlers again on reopening; Python
 handlers are not persisted. Tools execute without approval in this version.
+
+## Built-in tools
+
+File, search, and shell tools use Deep Agents' `FilesystemMiddleware` and
+`LocalShellBackend`. Web fetching uses LangChain Community's `RequestsGetTool`.
+The calculator remains available alongside these tools in terminal and headless
+operation.
+
+| Tool | Behavior |
+| --- | --- |
+| `calculator` | Bounded numeric arithmetic. |
+| `ls` | List entries in a supplied directory. |
+| `read_file` | Read files, with `offset` and `limit` for paginated text. |
+| `write_file` | Create or overwrite a file; create parent directories as needed. |
+| `edit_file` | Replace exact text; require one match unless `replace_all=true`. |
+| `glob` | Find paths matching a glob pattern. |
+| `grep` | Literal-text search, with path/glob filters and files/content/count output. |
+| `execute` | Run a shell command directly in the application's environment. |
+| `requests_get` | Fetch a URL with HTTP GET and return its response body as text. |
+
+The workspace is the working directory when `AgentRuntime` is constructed.
+File paths can be absolute, relative to that workspace, parent paths, or `~`
+paths. `grep` and `glob` search the workspace by default. Regex searches can use
+`execute` with an installed command such as `rg`.
+
+Each shell call starts a new system shell in the workspace and inherits the
+parent environment. `cd` and `export` changes do not carry over to subsequent
+calls. The default timeout is 120 seconds, with an optional per-call `timeout`
+up to 3,600 seconds. Output is truncated at the backend's 100,000-character
+threshold (upstream labels it as bytes); stderr lines are marked `[stderr]`,
+and nonzero exit codes are included in the result. Interpret those exit codes
+even when the upstream tool message has success status.
+
+Web fetch returns raw HTML, text, or JSON text, follows redirects, and retains
+response bodies for HTTP error statuses. Network exceptions become tool errors.
+Its runtime-owned HTTP session has a 30-second timeout and closes with the runtime.
+No browser rendering, HTML extraction, or authenticated request configuration is
+provided.
+
+For example, send these prompts using the `send` command or terminal editor:
+
+```text
+Find Python files under src, then search them for the literal text TODO.
+Write notes/example.txt containing hello, replace hello with welcome, and read it back.
+Run pwd and report the command output and exit code.
+Fetch https://example.com and summarize the returned HTML.
+```
+
+Tools act directly on host files and commands without sandboxing or approval.
+Cancelling a turn or restoring completed history does not undo tool effects.
+An in-flight shell command dispatched to the backend's worker can continue after
+stream cancellation; upstream timeout handling does not guarantee cleanup of all
+child processes. Restoration does not replay abandoned calls. Automatic message
+and tool-result offloading is disabled.
+
+OS-sandboxed shell execution is deferred; its integration, compatibility, resource
+lifecycle, and test design are saved in
+[the sandbox design document](../../docs/langchain-shell-sandbox-design.md).
 
 Inject a LangChain `BaseChatModel` through `model=...` for custom configuration or
 offline testing; injected models remain caller-owned. For example, an injected
@@ -171,7 +228,7 @@ operations are serialized. A SQLite failure halts further operations until closi
 and reopening. Use `async with` to release database connections, owned HTTP
 clients, and the process lock.
 
-Approvals, filesystem/Bash tools, context compaction, automatic checkpoint pruning,
+Approvals, sandbox execution, context compaction, automatic checkpoint pruning,
 old transcript import, and advanced slash commands are outside this version.
 
 ## Tests
