@@ -6,11 +6,12 @@ import json
 import sys
 from contextlib import aclosing
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
-from .runtime import AgentRuntime
-from .session import ChatSession, MessageState
+from .application import AgentApplication
+from .message_state import MessageState
 from .terminal import ChatApplication
+from .terminal_chat import TerminalChatController
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -19,12 +20,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("new", help="create a conversation and print its ID")
     chat = commands.add_parser("chat", help="open terminal chat (default)")
-    chat.add_argument("conversation_id", nargs="?", help="resume a saved conversation")
+    chat.add_argument("thread_id", nargs="?", help="resume a saved thread")
     send = commands.add_parser("send", help="stream one prompt")
-    send.add_argument("conversation_id")
+    send.add_argument("thread_id")
     send.add_argument("input", metavar="PROMPT")
     history = commands.add_parser("history", help="print completed history as JSON")
-    history.add_argument("conversation_id")
+    history.add_argument("thread_id")
     return parser
 
 
@@ -34,26 +35,29 @@ async def arun(args: argparse.Namespace) -> int:
         raise ValueError(
             "chat requires a terminal; use new, send, or history for headless operation"
         )
-    async with AgentRuntime(args.database) as runtime:
+    async with AgentApplication(args.database) as application:
         if args.command == "new":
-            print(await runtime.acreate_conversation())
+            print(await application.threads.acreate())
             return 0
-        conversation_id = getattr(args, "conversation_id", None)
-        if conversation_id is None:
-            conversation_id = await runtime.acreate_conversation()
-        info = await runtime.arestore_conversation(conversation_id)
+        thread_id = getattr(args, "thread_id", None)
+        if thread_id is None:
+            thread_id = await application.threads.acreate()
+        info = await application.threads.aget(thread_id)
         diagnostic = "Unfinished work excluded; restored the last completed turn."
         if interactive:
-            session = ChatSession(
-                runtime, conversation_id, await runtime.ahistory(conversation_id)
+            controller = TerminalChatController(
+                application.query,
+                thread_id,
+                await application.threads.ahistory(thread_id),
+                agent_factory=application.agents.acreate,
             )
             if info.unfinished_work_excluded:
-                session.notices.append(diagnostic)
-            return await ChatApplication(session).arun()
+                controller.notices.append(diagnostic)
+            return await ChatApplication(controller).arun()
         if info.unfinished_work_excluded:
             print(diagnostic, file=sys.stderr)
         if args.command == "history":
-            messages = await runtime.ahistory(conversation_id)
+            messages = await application.threads.ahistory(thread_id)
             print(
                 json.dumps(
                     [m.model_dump(mode="json") for m in messages], ensure_ascii=False
@@ -62,7 +66,16 @@ async def arun(args: argparse.Namespace) -> int:
         else:
             state = MessageState()
             emitted: dict[str | None, str] = {}
-            async with aclosing(runtime.asend(conversation_id, args.input)) as stream:
+            if not args.input.strip():
+                raise ValueError("input must be a non-empty string")
+            agent = await application.agents.acreate()
+            async with aclosing(
+                application.query.asubmit(
+                    thread_id,
+                    agent=agent,
+                    input={"messages": [HumanMessage(content=args.input)]},
+                )
+            ) as stream:
                 async for part in stream:
                     state.update(part)
                     for message in state.messages:

@@ -7,10 +7,10 @@ from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
-from alpha_forge_langchain import AgentRuntime, PersistenceError
+from alpha_forge_langchain import AgentApplication, PersistenceError
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk
-from test_runtime import ScriptedModel, aconsume
+from test_agent_application import ScriptedModel, aconsume, astream
 
 
 class StreamingModel(ScriptedModel):
@@ -58,17 +58,21 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             release=release,
         )
         parts = []
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation_id = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation_id = await runtime.threads.acreate()
 
             async def consume():
-                async with aclosing(runtime.asend(conversation_id, "hello")) as stream:
+                async with aclosing(
+                    astream(runtime, conversation_id, "hello")
+                ) as stream:
                     async for part in stream:
                         parts.append(part)
                         if part["type"] == "values":
                             # The iterator must release the lock before completion.
                             self.assertEqual(
-                                (await runtime.ahistory(conversation_id))[-1].text,
+                                (await runtime.threads.ahistory(conversation_id))[
+                                    -1
+                                ].text,
                                 "Hello world",
                             )
 
@@ -94,7 +98,8 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any(p["type"] == "updates" for p in parts))
             parts[-1]["data"]["messages"][-1].content = "mutated"
             self.assertEqual(
-                (await runtime.ahistory(conversation_id))[-1].text, "Hello world"
+                (await runtime.threads.ahistory(conversation_id))[-1].text,
+                "Hello world",
             )
 
     async def test_early_close_cancels_graph_without_promoting_or_leaking_lock(self):
@@ -109,25 +114,23 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             ],
             release=release,
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation_id = await runtime.acreate_conversation()
-            async with aclosing(runtime.asend(conversation_id, "old")) as stream:
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation_id = await runtime.threads.acreate()
+            async with aclosing(astream(runtime, conversation_id, "old")) as stream:
                 part = await asyncio.wait_for(anext(stream), 5)
                 while part["type"] != "messages":
                     part = await asyncio.wait_for(anext(stream), 5)
                 self.assertEqual(part["type"], "messages")
             self.assertEqual(
-                await asyncio.wait_for(runtime.ahistory(conversation_id), 5), []
+                await asyncio.wait_for(runtime.threads.ahistory(conversation_id), 5), []
             )
             self.assertTrue(
-                (
-                    await runtime.arestore_conversation(conversation_id)
-                ).unfinished_work_excluded
+                (await runtime.threads.aget(conversation_id)).unfinished_work_excluded
             )
             release.set()
             await asyncio.wait_for(aconsume(runtime, conversation_id, "new"), 5)
             self.assertEqual(
-                [m.text for m in await runtime.ahistory(conversation_id)],
+                [m.text for m in await runtime.threads.ahistory(conversation_id)],
                 ["new", "fresh"],
             )
 
@@ -141,18 +144,20 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(content="fresh"),
             ]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation_id = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation_id = await runtime.threads.acreate()
             await aconsume(runtime, conversation_id, "first")
             parts = []
             with self.assertRaisesRegex(RuntimeError, "provider failed"):
-                async with aclosing(runtime.asend(conversation_id, "failed")) as stream:
+                async with aclosing(
+                    astream(runtime, conversation_id, "failed")
+                ) as stream:
                     async for part in stream:
                         parts.append(part)
             self.assertTrue(any(p["type"] == "messages" for p in parts))
             self.assertFalse(any(p["type"] == "values" for p in parts))
             self.assertEqual(
-                [m.text for m in await runtime.ahistory(conversation_id)],
+                [m.text for m in await runtime.threads.ahistory(conversation_id)],
                 ["first", "baseline"],
             )
             await aconsume(runtime, conversation_id, "next")
@@ -162,20 +167,22 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_promotion_never_emits_values(self):
         model = StreamingModel(responses=[AIMessage(content="uncommitted")])
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation_id = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation_id = await runtime.threads.acreate()
             parts = []
             with (
                 patch.object(
-                    runtime._conversation_store,
+                    runtime._persistence._threads,
                     "apromote",
                     side_effect=sqlite3.OperationalError("disk failed"),
                 ),
                 self.assertRaises(PersistenceError),
             ):
-                async with aclosing(runtime.asend(conversation_id, "hello")) as stream:
+                async with aclosing(
+                    astream(runtime, conversation_id, "hello")
+                ) as stream:
                     async for part in stream:
                         parts.append(part)
             self.assertFalse(any(p["type"] == "values" for p in parts))
-        async with AgentRuntime(self.database) as runtime:
-            self.assertEqual(await runtime.ahistory(conversation_id), [])
+        async with AgentApplication(self.database) as runtime:
+            self.assertEqual(await runtime.threads.ahistory(conversation_id), [])

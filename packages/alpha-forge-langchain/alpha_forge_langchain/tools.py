@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 
 
 def web_fetch_tool() -> RequestsGetTool:
-    """Create the native GET tool; the runtime supplies its owned HTTP session."""
+    """Create the native GET tool; the agent factory supplies its owned HTTP session."""
     return RequestsGetTool(
         requests_wrapper=TextRequestsWrapper(),
         allow_dangerous_requests=True,

@@ -9,13 +9,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from alpha_forge_langchain import (
-    AgentRuntime,
-    ConversationNotFoundError,
+    AgentApplication,
     DatabaseBusyError,
     PersistenceError,
+    ThreadNotFoundError,
 )
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from pydantic import Field
@@ -51,10 +51,26 @@ class ScriptedModel(BaseChatModel):
         )
 
 
+async def astream(runtime, conversation_id, input):
+    """Adapt text fixtures to the application factory and native query input."""
+    if not isinstance(input, str) or not input.strip():
+        raise ValueError("input must be a non-empty string")
+    agent = await runtime.agents.acreate()
+    async with aclosing(
+        runtime.query.asubmit(
+            conversation_id,
+            agent=agent,
+            input={"messages": [HumanMessage(content=input)]},
+        )
+    ) as stream:
+        async for part in stream:
+            yield part
+
+
 async def aconsume(runtime, conversation_id, input):
     """Collect committed values in tests without a second runtime execution API."""
     output = None
-    async with aclosing(runtime.asend(conversation_id, input)) as stream:
+    async with aclosing(astream(runtime, conversation_id, input)) as stream:
         async for part in stream:
             if part["type"] == "values":
                 output = part["data"]
@@ -76,7 +92,7 @@ def call(name="calculator", arguments=None, call_id="call-1"):
     )
 
 
-class RuntimeTests(unittest.IsolatedAsyncioTestCase):
+class AgentApplicationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """Override IsolatedAsyncioTestCase.asyncSetUp to create a fresh database path."""
         self.temporary = tempfile.TemporaryDirectory()
@@ -90,8 +106,8 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = ScriptedModel(
             responses=[call(), AIMessage(content="20"), AIMessage(content="Again: 20")]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation = await runtime.threads.acreate()
             result = await aconsume(runtime, conversation, "Calculate")
             self.assertEqual(result["messages"][-1].text, "20")
             self.assertEqual(
@@ -99,7 +115,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(result["messages"][2].content, "20")
             await aconsume(runtime, conversation, "Repeat")
-            history = await runtime.ahistory(conversation)
+            history = await runtime.threads.ahistory(conversation)
             self.assertEqual(
                 [m.type for m in history], ["human", "ai", "tool", "ai", "human", "ai"]
             )
@@ -111,14 +127,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             result["messages"][0].content = "mutated"
             history[0].content = "mutated"
             self.assertEqual(
-                (await runtime.ahistory(conversation))[0].content, "Calculate"
+                (await runtime.threads.ahistory(conversation))[0].content, "Calculate"
             )
         next_model = ScriptedModel(responses=[AIMessage(content="Still 20")])
-        async with AgentRuntime(self.database, model=next_model) as runtime:
-            info = await runtime.arestore_conversation(conversation)
+        async with AgentApplication(self.database, model=next_model) as runtime:
+            info = await runtime.threads.aget(conversation)
             self.assertFalse(info.unfinished_work_excluded)
             self.assertEqual(next_model.seen, [])
-            self.assertEqual(len(await runtime.ahistory(conversation)), 6)
+            self.assertEqual(len(await runtime.threads.ahistory(conversation)), 6)
             result = await aconsume(runtime, conversation, "Remember?")
             self.assertEqual(
                 len(next_model.seen[0]), 8
@@ -140,8 +156,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(content="Division failed"),
             ]
         )
-        async with AgentRuntime(self.database, model=model, tools=[explode]) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(
+            self.database, model=model, tools=[explode]
+        ) as runtime:
+            conversation = await runtime.threads.acreate()
             result = await aconsume(runtime, conversation, "Use custom tool")
             self.assertEqual(result["messages"][2].status, "error")
             self.assertIn("cannot process test", result["messages"][2].content)
@@ -165,26 +183,28 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 RuntimeError("provider failed"),
             ]
         )
-        async with AgentRuntime(self.database, model=model, tools=[record]) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(
+            self.database, model=model, tools=[record]
+        ) as runtime:
+            conversation = await runtime.threads.acreate()
             await aconsume(runtime, conversation, "First")
-            head = (await runtime.arestore_conversation(conversation)).checkpoint_id
+            head = (await runtime.threads.aget(conversation)).checkpoint_id
             with self.assertRaisesRegex(RuntimeError, "provider failed"):
                 await aconsume(runtime, conversation, "Unfinished")
             self.assertEqual(actions, ["once"])
             self.assertEqual(
-                (await runtime.arestore_conversation(conversation)).checkpoint_id, head
+                (await runtime.threads.aget(conversation)).checkpoint_id, head
             )
         model = ScriptedModel(responses=[AIMessage(content="fresh")])
-        async with AgentRuntime(self.database, model=model, tools=[record]) as runtime:
+        async with AgentApplication(
+            self.database, model=model, tools=[record]
+        ) as runtime:
             self.assertTrue(
-                (
-                    await runtime.arestore_conversation(conversation)
-                ).unfinished_work_excluded
+                (await runtime.threads.aget(conversation)).unfinished_work_excluded
             )
             self.assertEqual(model.seen, [])
             self.assertEqual(
-                [m.content for m in await runtime.ahistory(conversation)],
+                [m.content for m in await runtime.threads.ahistory(conversation)],
                 ["First", "baseline"],
             )
             await aconsume(runtime, conversation, "New prompt")
@@ -203,26 +223,22 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             self.assertFalse(
-                (
-                    await runtime.arestore_conversation(conversation)
-                ).unfinished_work_excluded
+                (await runtime.threads.aget(conversation)).unfinished_work_excluded
             )
 
-    async def test_failed_first_turn_gets_empty_history_and_fresh_thread(self):
+    async def test_failed_first_turn_gets_empty_history_and_stable_thread(self):
         model = ScriptedModel(
             responses=[RuntimeError("failed"), AIMessage(content="new")]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation = await runtime.threads.acreate()
             with self.assertRaises(RuntimeError):
                 await aconsume(runtime, conversation, "old")
-            abandoned_thread = (
-                await runtime.arestore_conversation(conversation)
-            ).thread_id
-            self.assertEqual(await runtime.ahistory(conversation), [])
+            abandoned_thread = (await runtime.threads.aget(conversation)).thread_id
+            self.assertEqual(await runtime.threads.ahistory(conversation), [])
             await aconsume(runtime, conversation, "fresh")
-            self.assertNotEqual(
-                (await runtime.arestore_conversation(conversation)).thread_id,
+            self.assertEqual(
+                (await runtime.threads.aget(conversation)).thread_id,
                 abandoned_thread,
             )
             self.assertEqual([m.content for m in model.seen[-1][1:]], ["fresh"])
@@ -234,12 +250,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(content="recovered"),
             ]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation = await runtime.threads.acreate()
             with self.assertRaisesRegex(Exception, "limit"):
                 await aconsume(runtime, conversation, "loop")
             self.assertEqual(len(model.seen), 10)
-            self.assertEqual(await runtime.ahistory(conversation), [])
+            self.assertEqual(await runtime.threads.ahistory(conversation), [])
             await aconsume(runtime, conversation, "fresh")
             self.assertEqual(len(model.seen), 11)
 
@@ -247,12 +263,12 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = ScriptedModel(
             responses=[AIMessage(content="baseline"), AIMessage(content="not promoted")]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation = await runtime.threads.acreate()
             await aconsume(runtime, conversation, "first")
             with (
                 patch.object(
-                    runtime._conversation_store,
+                    runtime._persistence._threads,
                     "apromote",
                     side_effect=sqlite3.OperationalError("disk failed"),
                 ),
@@ -261,11 +277,11 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await aconsume(runtime, conversation, "second")
             with self.assertRaisesRegex(PersistenceError, "reopen"):
                 await aconsume(runtime, conversation, "blocked")
-        async with AgentRuntime(self.database) as runtime:
-            info = await runtime.arestore_conversation(conversation)
+        async with AgentApplication(self.database) as runtime:
+            info = await runtime.threads.aget(conversation)
             self.assertTrue(info.unfinished_work_excluded)
             self.assertEqual(
-                [m.content for m in await runtime.ahistory(conversation)],
+                [m.content for m in await runtime.threads.ahistory(conversation)],
                 ["first", "baseline"],
             )
 
@@ -273,21 +289,21 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         model = ScriptedModel(
             responses=[AIMessage(content="baseline"), AIMessage(content="next")]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation = await runtime.threads.acreate()
             await aconsume(runtime, conversation, "first")
             with (
                 patch.object(
-                    runtime._checkpointer,
+                    runtime._persistence._checkpointer,
                     "aput",
                     side_effect=sqlite3.OperationalError("checkpoint failed"),
                 ),
                 self.assertRaises(PersistenceError),
             ):
                 await aconsume(runtime, conversation, "second")
-        async with AgentRuntime(self.database) as runtime:
+        async with AgentApplication(self.database) as runtime:
             self.assertEqual(
-                [m.content for m in await runtime.ahistory(conversation)],
+                [m.content for m in await runtime.threads.ahistory(conversation)],
                 ["first", "baseline"],
             )
 
@@ -304,82 +320,80 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await never.wait()
                 raise AssertionError("waiting model should always be cancelled")
 
-        async with AgentRuntime(self.database, model=WaitingModel()) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=WaitingModel()) as runtime:
+            conversation = await runtime.threads.acreate()
             task = asyncio.create_task(aconsume(runtime, conversation, "wait"))
             await asyncio.wait_for(entered.wait(), timeout=5)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
-        async with AgentRuntime(self.database) as runtime:
+        async with AgentApplication(self.database) as runtime:
             self.assertTrue(
-                (
-                    await runtime.arestore_conversation(conversation)
-                ).unfinished_work_excluded
+                (await runtime.threads.aget(conversation)).unfinished_work_excluded
             )
-            self.assertEqual(await runtime.ahistory(conversation), [])
+            self.assertEqual(await runtime.threads.ahistory(conversation), [])
 
     async def test_isolation_validation_and_keyless_inspection(self):
         with patch.dict(os.environ, {}, clear=True):
-            async with AgentRuntime(self.database) as runtime:
-                conversation = await runtime.acreate_conversation()
-                self.assertEqual(await runtime.ahistory(conversation), [])
-                await runtime.arestore_conversation(conversation)
+            async with AgentApplication(self.database) as runtime:
+                conversation = await runtime.threads.acreate()
+                self.assertEqual(await runtime.threads.ahistory(conversation), [])
+                await runtime.threads.aget(conversation)
                 with self.assertRaisesRegex(ValueError, "OPENAI_API_KEY"):
                     await aconsume(runtime, conversation, "hello")
                 self.assertFalse(
-                    (
-                        await runtime.arestore_conversation(conversation)
-                    ).unfinished_work_excluded
+                    (await runtime.threads.aget(conversation)).unfinished_work_excluded
                 )
-                with self.assertRaises(ConversationNotFoundError):
-                    await runtime.ahistory("missing")
+                with self.assertRaises(ThreadNotFoundError):
+                    await runtime.threads.ahistory("missing")
                 with self.assertRaises(ValueError):
                     await aconsume(runtime, conversation, "  ")
         model = ScriptedModel(
             responses=[AIMessage(content="private"), AIMessage(content="separate")]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
+        async with AgentApplication(self.database, model=model) as runtime:
             a, b = (
-                await runtime.acreate_conversation(),
-                await runtime.acreate_conversation(),
+                await runtime.threads.acreate(),
+                await runtime.threads.acreate(),
             )
             await aconsume(runtime, a, "secret")
             await aconsume(runtime, b, "hello")
             self.assertEqual([m.content for m in model.seen[-1][1:]], ["hello"])
 
     async def test_lock_lifecycle_and_missing_checkpoint(self):
-        runtime = AgentRuntime(
+        runtime = AgentApplication(
             self.database, model=ScriptedModel(responses=[AIMessage(content="ok")])
         )
         with self.assertRaises(RuntimeError):
-            await runtime.acreate_conversation()
+            await runtime.threads.acreate()
         async with runtime:
             with self.assertRaises(DatabaseBusyError):
-                async with AgentRuntime(self.database):
+                async with AgentApplication(self.database):
                     pass
-            conversation = await runtime.acreate_conversation()
+            conversation = await runtime.threads.acreate()
             await aconsume(runtime, conversation, "hello")
             with (
-                patch.object(runtime._checkpointer, "aget_tuple", return_value=None),
+                patch.object(
+                    runtime._persistence._checkpointer, "aget_tuple", return_value=None
+                ),
                 self.assertRaisesRegex(PersistenceError, "missing"),
             ):
-                await runtime.arestore_conversation(conversation)
-        async with AgentRuntime(self.database) as runtime:
-            await runtime.arestore_conversation(conversation)
+                await runtime.threads.aget(conversation)
+        async with AgentApplication(self.database) as runtime:
+            await runtime.threads.aget(conversation)
 
     async def test_operations_are_serialized(self):
         model = ScriptedModel(
             responses=[AIMessage(content="one"), AIMessage(content="two")]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation = await runtime.threads.acreate()
             await asyncio.gather(
                 aconsume(runtime, conversation, "first"),
                 aconsume(runtime, conversation, "second"),
             )
             self.assertEqual(
-                [m.content for m in await runtime.ahistory(conversation)],
+                [m.content for m in await runtime.threads.ahistory(conversation)],
                 ["first", "one", "second", "two"],
             )
 
@@ -455,14 +469,14 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                     "OPENAI_MODEL": "ignored-model",
                 },
             ),
-            patch("alpha_forge_langchain.runtime.OpenAI", side_effect=sync_client),
+            patch("alpha_forge_langchain.agents.OpenAI", side_effect=sync_client),
             patch(
-                "alpha_forge_langchain.runtime.AsyncOpenAI",
+                "alpha_forge_langchain.agents.AsyncOpenAI",
                 side_effect=async_client,
             ),
         ):
-            async with AgentRuntime(self.database) as runtime:
-                conversation = await runtime.acreate_conversation()
+            async with AgentApplication(self.database) as runtime:
+                conversation = await runtime.threads.acreate()
                 result = await aconsume(runtime, conversation, "hello")
                 self.assertEqual(result["messages"][-1].text, "SDK response")
                 self.assertEqual(
@@ -498,9 +512,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(content="next turn"),
             ]
         )
-        runtime = AgentRuntime(self.database, model=model)
+        runtime = AgentApplication(self.database, model=model)
         async with runtime:
-            conversation = await runtime.acreate_conversation()
+            conversation = await runtime.threads.acreate()
             await aconsume(runtime, conversation, "ten")
             self.assertEqual(len(model.seen), 10)
         async with runtime:

@@ -26,7 +26,7 @@ The editor stays available while the agent runs; submitted prompts execute FIFO.
 To resume a conversation:
 
 ```sh
-uv run --project packages/alpha-forge-langchain alpha-forge-langchain chat CONVERSATION_ID
+uv run --project packages/alpha-forge-langchain alpha-forge-langchain chat THREAD_ID
 ```
 
 - Enter submits nonblank input; Up/Down recall editor history.
@@ -44,8 +44,8 @@ Queued prompts and editor drafts are not persisted.
 
 ```sh
 uv run --project packages/alpha-forge-langchain alpha-forge-langchain new
-uv run --project packages/alpha-forge-langchain alpha-forge-langchain send CONVERSATION_ID "What is (2 + 3) * 4? Use the calculator."
-uv run --project packages/alpha-forge-langchain alpha-forge-langchain history CONVERSATION_ID
+uv run --project packages/alpha-forge-langchain alpha-forge-langchain send THREAD_ID "What is (2 + 3) * 4? Use the calculator."
+uv run --project packages/alpha-forge-langchain alpha-forge-langchain history THREAD_ID
 ```
 
 `new` prints a conversation ID. `send` streams assistant text to stdout; partial
@@ -60,64 +60,110 @@ The default database is
 before the subcommand, or use it alone for a new terminal conversation:
 
 ```sh
-uv run --project packages/alpha-forge-langchain alpha-forge-langchain --database ./conversations.sqlite3 chat CONVERSATION_ID
+uv run --project packages/alpha-forge-langchain alpha-forge-langchain --database ./conversations.sqlite3 chat THREAD_ID
 ```
 
 ## Python streaming API
 
+`AgentApplication` composes three separate components: `query` executes turns,
+`agents` builds native LangChain agents, and `threads` manages thread records and
+history. The checkpointer is wired privately at application construction.
+
+For direct OpenAI access, set `OPENAI_API_KEY` and choose your model through
+`OPENAI_MODEL` in this example:
+
 ```python
 import asyncio
+import os
 from contextlib import aclosing
-from langchain_core.messages import AIMessage
-from alpha_forge_langchain import AgentRuntime
+
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_openai import ChatOpenAI
+from alpha_forge_langchain import AgentApplication
 
 
 async def main():
-    async with AgentRuntime("./conversations.sqlite3") as runtime:
-        conversation_id = await runtime.acreate_conversation()
-        print("Conversation:", conversation_id)
-        async with aclosing(
-            runtime.asend(conversation_id, "Calculate 13 * 17.")
-        ) as stream:
-            async for part in stream:
-                if part["type"] == "messages":
-                    chunk, metadata = part["data"]
-                    if isinstance(chunk, AIMessage):
-                        print(chunk.text, end="", flush=True)
-                elif part["type"] == "updates":
-                    # Native node updates contain completed messages/tool results.
-                    pass
-                elif part["type"] == "values":
-                    print("\nSaved:", part["data"]["messages"][-1].text)
+    model = ChatOpenAI(model=os.environ["OPENAI_MODEL"])
+    async with AgentApplication("./threads.sqlite3", model=model) as app:
+        first = await app.threads.acreate()
+        second = await app.threads.acreate()
 
-    async with AgentRuntime("./conversations.sqlite3") as runtime:
-        info = await runtime.arestore_conversation(conversation_id)
+        async def run_turn(thread_id, text, prompt):
+            # Build/select an agent for this turn, not for the thread's lifetime.
+            agent = await app.agents.acreate(system_prompt=prompt)
+            async with aclosing(app.query.asubmit(
+                thread_id,
+                agent=agent,
+                input={"messages": [HumanMessage(content=text)]},
+            )) as stream:
+                async for part in stream:
+                    if part["type"] == "messages":
+                        chunk, metadata = part["data"]
+                        if isinstance(chunk, AIMessage):
+                            print(thread_id, chunk.text, flush=True)
+                    elif part["type"] == "values":
+                        print(thread_id, "Saved:", part["data"]["messages"][-1].text)
+
+        # The caller owns tasks. Exit them before closing application resources.
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(run_turn(first, "Calculate 13 * 17.", "Be concise."))
+            tasks.create_task(run_turn(second, "Explain multiplication.", "Be a tutor."))
+
+        # Next turn can change the prompt, tools, middleware, or model.
+        await run_turn(first, "Explain your answer.", "Explain step by step.")
+        print(await app.query.aget_state(first))
+
+    # Inspection does not require a model or credentials.
+    async with AgentApplication("./threads.sqlite3") as app:
+        info = await app.threads.aget(first)
         print("Unfinished work excluded:", info.unfinished_work_excluded)
-        print(await runtime.ahistory(conversation_id))
+        print(await app.threads.ahistory(first))
 
 
 asyncio.run(main())
 ```
 
-`asend()` is an async generator, consumed with `async for`, not `await`. It always
-uses LangGraph `astream`, with native v2 stream parts (`type`, `ns`, `data`),
-LangChain message objects, metadata, and node update dictionaries. Models without
-token streaming emit their completed assistant message when it becomes available.
-There is no `send()` compatibility alias or completed-response execution path.
+`QueryEngine.asubmit()` is an async generator: consume it with `async for`, not
+`await`. Calling it alone starts no work. Pass a coroutine that consumes the
+generator to `asyncio.create_task` or a task group. A `TerminalChatController`
+consumes FIFO input in its caller-owned task; separate terminal controllers can
+share one query engine.
 
-Unlike raw graph `values` streaming, this wrapper emits **one terminal `values`
-part only after successful checkpoint promotion**. Its `data` is the full completed
-graph state, including all conversation messages, and `interrupts` is empty.
-`messages`/`updates` parts are provisional. Errors raise exceptions and emit no
-terminal values. Always use `aclosing()` when consuming the generator: breaking
-before completion cancels unfinished graph work and releases the operation lock.
-Consume or close a provisional stream before calling another runtime operation;
-the lock is released before terminal values so history can be inspected there.
-Stream payloads and `ahistory()` results are independent copies.
+Each submission calls its supplied agent's native `astream` exactly once. Native
+v2 message/update parts retain LangChain objects and metadata. Models without
+token streaming emit completed messages when available. Supply only new input;
+LangGraph restores prior messages and compatible agent state from the committed
+checkpoint. `thread_id` is the same stable identifier used by LangGraph.
 
-System instructions are stored once in conversation metadata and supplied on each
-model request; they are not duplicated in the message history. The logical
-`conversation_id` is distinct from LangGraph's execution `thread_id`.
+Different threads progress concurrently. Same-thread submissions serialize from
+checkpoint selection through promotion. `aget_state()` and history inspection
+return the committed snapshot even while that thread is responding. Stream and
+state results are independent copies. QueryEngine owns no input queues, worker
+tasks, event broker, or public checkpointer.
+
+The generator emits **one terminal `values` part after successful checkpoint
+promotion**, with full public graph state and empty `interrupts`. Message/update
+parts are provisional; ordinary failures emit no terminal values. Always consume
+inside `aclosing()`: early closure or task cancellation cleans up unfinished graph
+work and releases the thread lock. That lock is released before terminal values,
+so another turn or history read can start there. Once durable promotion starts,
+its outcome is settled before cancellation propagates; an already committed turn
+is not rolled back. There is no detached agent execution after stream closure.
+
+The application agent factory accepts per-turn `model`, `tools`, `system_prompt`,
+`middleware`, `state_schema`, `context_schema`, and `response_format` arguments.
+Pass per-turn runnable configuration and runtime `context` to `asubmit`. Thread
+and checkpoint controls remain engine-owned. Agents must be built against this
+application's persistence backend; agents retained from a closed application
+must be rebuilt after reopening.
+
+Default system instructions belong to the current agent. To persist a thread
+prompt, include `system_prompt_override` in native input along with the new
+messages. Omitting it preserves the saved override; setting it to `None` clears
+it and restores the current agent's default. The override is applied by native
+model middleware before filesystem instructions are appended. Failed turns do
+not commit prompt changes. Custom state must obey LangGraph's compatibility rules;
+there is no automatic migration for incompatible schemas.
 
 Add tools using LangChain conventions:
 
@@ -131,12 +177,14 @@ def uppercase(text: str) -> str:
     return text.upper()
 
 
-runtime = AgentRuntime("./conversations.sqlite3", tools=[uppercase])
+# Inside the application context:
+agent = await app.agents.acreate(tools=[uppercase])
 ```
 
-Tool names must be unique across all built-ins and supplied tools. Ordinary tool exceptions become error tool
-messages so the model can respond. Supply tool handlers again on reopening; Python
-handlers are not persisted. Tools execute without approval in this version.
+Tool names must be unique across built-ins and supplied tools. Ordinary tool
+exceptions become error tool messages so the model can respond. Supply Python
+handlers again on reopening; handlers are not persisted. Tools execute without
+approval in this version.
 
 ## Built-in tools
 
@@ -157,7 +205,7 @@ operation.
 | `execute` | Run a shell command directly in the application's environment. |
 | `requests_get` | Fetch a URL with HTTP GET and return its response body as text. |
 
-The workspace is the working directory when `AgentRuntime` is constructed.
+The workspace is the working directory when `AgentApplication` is constructed.
 File paths can be absolute, relative to that workspace, parent paths, or `~`
 paths. `grep` and `glob` search the workspace by default. Regex searches can use
 `execute` with an installed command such as `rg`.
@@ -172,7 +220,7 @@ even when the upstream tool message has success status.
 
 Web fetch returns raw HTML, text, or JSON text, follows redirects, and retains
 response bodies for HTTP error statuses. Network exceptions become tool errors.
-Its runtime-owned HTTP session has a 30-second timeout and closes with the runtime.
+Its factory-owned HTTP session has a 30-second timeout and closes with the application.
 No browser rendering, HTML extraction, or authenticated request configuration is
 provided.
 
@@ -223,10 +271,16 @@ Intermediate checkpoints remain for diagnosis. Even a finished checkpoint is
 excluded if a crash prevented promotion. Recovery avoids replaying abandoned tool
 calls; it does not undo tool effects or guarantee exactly-once execution.
 
-One runtime owns each database, enforced with an advisory process lock. Runtime
-operations are serialized. A SQLite failure halts further operations until closing
-and reopening. Use `async with` to release database connections, owned HTTP
-clients, and the process lock.
+One application owns each database, enforced with an advisory process lock.
+Queries serialize only within the same thread. Metadata transactions use a
+separate SQLite connection from native checkpoints, and committed public state
+and its head advance atomically. A SQLite failure halts further operations until
+closing and reopening. Finish caller-owned tasks and streams before leaving the
+application context to release database connections, owned clients, and the
+process lock.
+
+This private API and thread metadata schema replace `AgentRuntime`. Use a fresh
+database for this version; legacy conversation records are not migrated.
 
 Approvals, sandbox execution, context compaction, automatic checkpoint pruning,
 old transcript import, and advanced slash commands are outside this version.

@@ -70,7 +70,7 @@ recovery does not undo them or provide exactly-once execution.
 
 ## Future Python interface
 
-Add `shell_execution_policy: BaseExecutionPolicy | None = None` to `AgentRuntime`.
+Add `shell_execution_policy: BaseExecutionPolicy | None = None` to the application agent factory.
 `None` selects the supported OS sandbox policy. Explicit policy injection supports
 offline tests and caller-controlled alternative execution environments. Keep
 default CLI operation sandboxed, with no automatic fallback or API-key flag.

@@ -11,10 +11,10 @@ from unittest.mock import patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from alpha_forge_langchain import AgentRuntime
+from alpha_forge_langchain import AgentApplication
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
-from test_runtime import ScriptedModel, aconsume, call
+from test_agent_application import ScriptedModel, aconsume, astream, call
 
 BUILT_INS = {
     "calculator",
@@ -38,7 +38,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
         self.workspace.mkdir()
         self.database = self.root / "history.sqlite3"
         self.cwd = patch(
-            "alpha_forge_langchain.runtime.Path.cwd", return_value=self.workspace
+            "alpha_forge_langchain.agents.Path.cwd", return_value=self.workspace
         )
         self.cwd.start()
         self.addCleanup(self.cwd.stop)
@@ -53,16 +53,18 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(content="done"),
             ]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation = await runtime.threads.acreate()
             parts = []
-            async with aclosing(runtime.asend(conversation, "Use the tools")) as stream:
+            async with aclosing(
+                astream(runtime, conversation, "Use the tools")
+            ) as stream:
                 async for part in stream:
                     parts.append(part)
             self.assertEqual(model.bound_tools and set(model.bound_tools), BUILT_INS)
             self.assertEqual(parts[-1]["type"], "values")
             messages = parts[-1]["data"]["messages"]
-            self.assertEqual(messages, await runtime.ahistory(conversation))
+            self.assertEqual(messages, await runtime.threads.ahistory(conversation))
             results = [
                 message for message in messages if isinstance(message, ToolMessage)
             ]
@@ -189,8 +191,8 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 AIMessage(content="done"),
             ]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation = await runtime.threads.acreate()
             result = await aconsume(runtime, conversation, "write")
         messages = {
             message.tool_call_id: message
@@ -291,14 +293,17 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
             [result.text for result in results],
             ['{"value": 42}', '{"value": 42}', "missing body"],
         )
-        runtime = AgentRuntime(self.database)
+        runtime = AgentApplication(self.database)
         async with runtime:
-            session = runtime._web_fetch.requests_wrapper.aiosession
+            session = runtime.agents._web_fetch.requests_wrapper.aiosession
+            assert session is not None
             self.assertEqual(session.timeout.total, 30.0)
         self.assertTrue(session.closed)
-        self.assertIsNone(runtime._web_fetch.requests_wrapper.aiosession)
+        self.assertIsNone(runtime.agents._web_fetch.requests_wrapper.aiosession)
         async with runtime:
-            self.assertIsNot(runtime._web_fetch.requests_wrapper.aiosession, session)
+            self.assertIsNot(
+                runtime.agents._web_fetch.requests_wrapper.aiosession, session
+            )
 
     async def test_get_connection_and_timeout_errors(self):
         model = ScriptedModel(
@@ -315,10 +320,10 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 call("requests_get", {"url": "https://example.invalid/"}),
                 AIMessage(content="failed"),
             ]
-            async with AgentRuntime(self.database, model=model) as runtime:
-                conversation = await runtime.acreate_conversation()
+            async with AgentApplication(self.database, model=model) as runtime:
+                conversation = await runtime.threads.acreate()
                 with patch.object(
-                    runtime._web_fetch.requests_wrapper.aiosession,
+                    runtime.agents._web_fetch.requests_wrapper.aiosession,
                     "request",
                     side_effect=error,
                 ):
@@ -336,7 +341,7 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 return value
 
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "unique"):
-                AgentRuntime(self.database, tools=[duplicate])
+                AgentApplication(self.database, tools=[duplicate])
 
     async def test_failed_write_is_not_replayed_after_restore(self):
         model = ScriptedModel(
@@ -348,8 +353,8 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
                 RuntimeError("provider failed"),
             ]
         )
-        async with AgentRuntime(self.database, model=model) as runtime:
-            conversation = await runtime.acreate_conversation()
+        async with AgentApplication(self.database, model=model) as runtime:
+            conversation = await runtime.threads.acreate()
             await aconsume(runtime, conversation, "baseline")
             with self.assertRaisesRegex(RuntimeError, "provider failed"):
                 await aconsume(runtime, conversation, "write")
@@ -357,14 +362,15 @@ class BuiltinToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(target.read_text(), "tool effect")
         target.write_text("external change")
         restored = ScriptedModel(responses=[AIMessage(content="fresh")])
-        async with AgentRuntime(self.database, model=restored) as runtime:
+        async with AgentApplication(self.database, model=restored) as runtime:
             self.assertTrue(
-                (
-                    await runtime.arestore_conversation(conversation)
-                ).unfinished_work_excluded
+                (await runtime.threads.aget(conversation)).unfinished_work_excluded
             )
             self.assertEqual(
-                [message.text for message in await runtime.ahistory(conversation)],
+                [
+                    message.text
+                    for message in await runtime.threads.ahistory(conversation)
+                ],
                 ["baseline", "baseline"],
             )
             self.assertEqual(restored.seen, [])

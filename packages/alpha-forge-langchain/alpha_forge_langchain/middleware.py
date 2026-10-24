@@ -2,15 +2,43 @@
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import override
+from typing import NotRequired, override
 
 from deepagents.backends import LocalShellBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
 from langchain.agents.middleware.model_call_limit import ModelCallLimitState
-from langchain.agents.middleware.types import ToolCallRequest
-from langchain_core.messages import AIMessage, ToolCall, ToolMessage
+from langchain.agents.middleware.types import (
+    ModelRequest,
+    ModelResponse,
+    ToolCallRequest,
+)
+from langchain_core.messages import AIMessage, SystemMessage, ToolCall, ToolMessage
 from langgraph.types import Command
+
+
+class ThreadPromptState(AgentState):
+    system_prompt_override: NotRequired[str | None]
+
+
+class ThreadPromptMiddleware(AgentMiddleware):
+    """Apply an optional persisted thread prompt to each native model request."""
+
+    state_schema = ThreadPromptState
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelResponse:
+        prompt = request.state.get("system_prompt_override")
+        if prompt is not None:
+            if not isinstance(prompt, str):
+                raise ValueError("system_prompt_override must be a string or None")
+            request = request.override(system_message=SystemMessage(content=prompt))
+        return await handler(request)
 
 
 @wrap_tool_call(state_schema=ModelCallLimitState)

@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from uuid import UUID
 
-from alpha_forge_langchain import AgentRuntime
+from alpha_forge_langchain import AgentApplication
 from alpha_forge_langchain.defaults import database_path
 
 
@@ -68,7 +68,7 @@ class CliTests(unittest.TestCase):
         result = self.invoke("history", "unknown")
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, "")
-        self.assertIn("unknown conversation", result.stderr)
+        self.assertIn("unknown thread", result.stderr)
         conversation = self.invoke("new").stdout.strip()
         result = self.invoke("send", conversation, "hello")
         self.assertEqual(result.returncode, 1)
@@ -126,7 +126,7 @@ class CliTests(unittest.TestCase):
         import asyncio
 
         async def hold():
-            async with AgentRuntime(self.database):
+            async with AgentApplication(self.database):
                 result = await asyncio.to_thread(self.invoke, "new")
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("database is in use", result.stderr)
@@ -138,11 +138,11 @@ class CliTests(unittest.TestCase):
         import asyncio
 
         async def prepare():
-            async with AgentRuntime(self.database) as runtime:
-                conversation = await runtime.acreate_conversation()
-                assert runtime._conversation_store is not None
-                await runtime._conversation_store.abegin(
-                    await runtime.arestore_conversation(conversation)
+            async with AgentApplication(self.database) as runtime:
+                conversation = await runtime.threads.acreate()
+                assert runtime._persistence._threads is not None
+                await runtime._persistence._threads.abegin(
+                    await runtime.threads.aget(conversation)
                 )
                 return conversation
 

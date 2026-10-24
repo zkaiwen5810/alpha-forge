@@ -1,85 +1,40 @@
-"""Async submission queue and native LangChain message state for terminal chat."""
+"""Terminal chat input queue, presentation state, and query task lifecycle."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import aclosing
-from copy import deepcopy
+from typing import Any
 from uuid import uuid4
 
-from langchain.agents import AgentState
-from langchain.agents.middleware.types import OutputAgentState
 from langchain_core.messages import (
     BaseMessage,
-    BaseMessageChunk,
     HumanMessage,
-    message_chunk_to_message,
 )
-from langgraph.types import StreamPart
+from langgraph.graph.state import CompiledStateGraph
 
-from .runtime import AgentRuntime, PersistenceError
-
-
-class MessageState:
-    """Reconcile message chunks and completed node updates by message ID."""
-
-    def __init__(self, messages: Sequence[BaseMessage] = ()) -> None:
-        self.messages: list[BaseMessage] = deepcopy(list(messages))
-        self._indices = {m.id: i for i, m in enumerate(self.messages) if m.id}
-        self._chunks: dict[str, BaseMessageChunk] = {}
-
-    def add_message(self, message: BaseMessage) -> None:
-        message = deepcopy(message)
-        index = self._indices.get(message.id) if message.id else None
-        if index is None:
-            if message.id:
-                self._indices[message.id] = len(self.messages)
-            self.messages.append(message)
-        else:
-            self.messages[index] = message
-
-    def update(
-        self, part: StreamPart[AgentState[object], OutputAgentState[object]]
-    ) -> None:
-        if part["type"] == "messages":
-            chunk, _metadata = part["data"]
-            if isinstance(chunk, BaseMessageChunk):
-                message_id = chunk.id
-                if message_id:
-                    previous = self._chunks.get(message_id)
-                    chunk = (
-                        previous + chunk if previous is not None else deepcopy(chunk)
-                    )
-                    self._chunks[message_id] = chunk
-                self.add_message(message_chunk_to_message(chunk))
-            else:
-                self.add_message(chunk)
-        elif part["type"] == "updates":
-            for update in part["data"].values():
-                if not isinstance(update, dict):
-                    continue
-                for message in update.get("messages", ()):
-                    if isinstance(message, BaseMessage):
-                        self.add_message(message)
-                        if message.id:
-                            self._chunks.pop(message.id, None)
+from .errors import PersistenceError
+from .message_state import MessageState
+from .query_engine import QueryEngine
 
 
-class ChatSession:
-    """One FIFO consumer; rendering subscribes through lightweight callbacks."""
+class TerminalChatController:
+    """Drive one terminal thread; notify the UI as presentation state changes."""
 
     def __init__(
         self,
-        runtime: AgentRuntime,
-        conversation_id: str,
+        query: QueryEngine,
+        thread_id: str,
         messages: Sequence[BaseMessage] = (),
         *,
+        agent_factory: Callable[[], Awaitable[CompiledStateGraph[Any, Any, Any, Any]]],
         on_change: Callable[[], None] = lambda: None,
         on_exit: Callable[[int], None] = lambda _code: None,
     ) -> None:
-        self.runtime = runtime
-        self.conversation_id = conversation_id
+        self.query = query
+        self.thread_id = thread_id
+        self._agent_factory = agent_factory
         self.message_state = MessageState(messages)
         self.on_change = on_change
         self.on_exit = on_exit
@@ -117,22 +72,24 @@ class ChatSession:
 
     async def arun(self) -> None:
         if self._worker is not None:
-            raise RuntimeError("chat session is already running")
+            raise RuntimeError("terminal chat controller is already running")
         self._worker = asyncio.current_task()
         try:
             while not self.is_exiting:
                 input = await self.queue.get()
                 start = len(self.message_state.messages)
-                self.message_state.add_message(
-                    HumanMessage(content=input, id=str(uuid4()))
-                )
+                human = HumanMessage(content=input, id=str(uuid4()))
+                self.message_state.add_message(human)
                 self.is_processing = True
                 self.status = "Responding"
                 self.on_change()
                 try:
                     completed = False
+                    agent = await self._agent_factory()
                     async with aclosing(
-                        self.runtime.asend(self.conversation_id, input)
+                        self.query.asubmit(
+                            self.thread_id, agent=agent, input={"messages": [human]}
+                        )
                     ) as stream:
                         async for part in stream:
                             if part["type"] == "values":

@@ -5,21 +5,21 @@ import os
 import sys
 from unittest.mock import patch
 
-from alpha_forge_langchain import AgentRuntime
+from alpha_forge_langchain import AgentApplication
 from langchain_core.messages import AIMessage
-from test_runtime import ScriptedModel, aconsume
+from test_agent_application import ScriptedModel, aconsume
 
 
 async def main():
     model = ScriptedModel(
         responses=[AIMessage(content="baseline"), AIMessage(content="unpromoted")]
     )
-    async with AgentRuntime(sys.argv[1], model=model) as runtime:
-        conversation = await runtime.acreate_conversation()
+    async with AgentApplication(sys.argv[1], model=model) as runtime:
+        conversation = await runtime.threads.acreate()
         await aconsume(runtime, conversation, "first")
         print(conversation, flush=True)
         with patch.object(
-            runtime._conversation_store,
+            runtime._persistence._threads,
             "apromote",
             side_effect=lambda *args: os._exit(23),
         ):

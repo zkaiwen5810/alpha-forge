@@ -1,4 +1,4 @@
-"""Full-screen prompt-toolkit UI for a streaming ChatSession."""
+"""Full-screen prompt-toolkit UI for a streaming TerminalChatController."""
 
 from __future__ import annotations
 
@@ -19,18 +19,18 @@ from prompt_toolkit.output.base import Output
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 
-from .session import ChatSession
+from .terminal_chat import TerminalChatController
 
 
 class ChatApplication:
     def __init__(
         self,
-        session: ChatSession,
+        controller: TerminalChatController,
         *,
         input: Input | None = None,
         output: Output | None = None,
     ) -> None:
-        self.session = session
+        self.controller = controller
         self.transcript = TextArea(read_only=True, scrollbar=True, wrap_lines=True)
         self.editor = TextArea(
             height=1,
@@ -43,11 +43,11 @@ class ChatApplication:
 
         @bindings.add("c-c")
         def cancel(_event: KeyPressEvent) -> None:
-            self.session.request_exit(130)
+            self.controller.request_exit(130)
 
         @bindings.add("c-d")
         def exit_chat(_event: KeyPressEvent) -> None:
-            self.session.request_exit()
+            self.controller.request_exit()
 
         @bindings.add("pageup")
         def scroll_up(_event: KeyPressEvent) -> None:
@@ -88,26 +88,26 @@ class ChatApplication:
             input=input,
             output=output,
         )
-        self.session.on_change = self._refresh
-        self.session.on_exit = self._exit
+        self.controller.on_change = self._refresh
+        self.controller.on_exit = self._exit
         self._refresh()
 
     def _header(self) -> str:
-        return f"Alpha Forge LangChain | Conversation: {self.session.conversation_id}"
+        return f"Alpha Forge LangChain | Thread: {self.controller.thread_id}"
 
     def _status(self) -> str:
         return (
-            f"{self.session.status} | {self.session.queue.qsize()} queued"
+            f"{self.controller.status} | {self.controller.queue.qsize()} queued"
             " | Enter: send | PgUp/PgDn: scroll | Ctrl+C/Ctrl+D: exit"
         )
 
     def _accept_input(self, buffer: Buffer) -> bool:
-        self.session.submit(buffer.text)
+        self.controller.submit(buffer.text)
         return False
 
     def _refresh(self) -> None:
         lines: list[str] = []
-        for message in self.session.message_state.messages:
+        for message in self.controller.message_state.messages:
             if isinstance(message, HumanMessage):
                 role = "You"
             elif isinstance(message, ToolMessage):
@@ -115,7 +115,7 @@ class ChatApplication:
             else:
                 role = "Assistant"
             status = (
-                self.session.message_status.get(message.id, "completed")
+                self.controller.message_status.get(message.id, "completed")
                 if message.id
                 else "completed"
             )
@@ -128,7 +128,7 @@ class ChatApplication:
                         f"  Tool call {call['name']}: {json.dumps(call['args'], ensure_ascii=False)}"
                     )
             lines.append("")
-        lines.extend(self.session.notices)
+        lines.extend(self.controller.notices)
         text = "\n".join(lines)
         old = self.transcript.buffer.document
         following = old.cursor_position == len(old.text)
@@ -148,15 +148,15 @@ class ChatApplication:
             self.app.exit(result=exit_code)
 
     async def arun(self) -> int:
-        worker = asyncio.create_task(self.session.arun())
+        worker = asyncio.create_task(self.controller.arun())
         try:
             return await self.app.run_async()
         except EOFError:
             return 0
         finally:
-            self.session.request_exit()
+            self.controller.request_exit()
             # A second cancellation can interrupt the graph's async cleanup.
-            # Only cancel here if the session worker has not started yet.
+            # Only cancel here if the controller worker has not started yet.
             if not worker.done() and not worker.cancelling():
                 worker.cancel()
             with suppress(asyncio.CancelledError):
