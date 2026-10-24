@@ -11,7 +11,6 @@ from uuid import uuid4
 from langchain.agents import AgentState
 from langchain.agents.middleware.types import OutputAgentState
 from langchain_core.messages import (
-    AIMessage,
     BaseMessage,
     BaseMessageChunk,
     HumanMessage,
@@ -45,9 +44,6 @@ class MessageState:
     ) -> None:
         if part["type"] == "messages":
             chunk, _metadata = part["data"]
-            # Tool results arrive through updates, avoiding duplicate tool text.
-            if not isinstance(chunk, AIMessage):
-                return
             if isinstance(chunk, BaseMessageChunk):
                 message_id = chunk.id
                 if message_id:
