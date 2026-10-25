@@ -39,6 +39,7 @@ class ThreadRepository:
             return info
 
     async def ahistory(self, thread_id: str) -> list[BaseMessage]:
+        """Read the original committed transcript, not a model-context view."""
         return await self._persistence.read_history(thread_id)
 
 

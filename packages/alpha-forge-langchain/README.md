@@ -190,6 +190,77 @@ exceptions become error tool messages so the model can respond. Supply Python
 handlers again on reopening; handlers are not persisted. Tools execute without
 approval in this version.
 
+## Transcript and model-facing context
+
+Keep one original transcript and derive a separate view for each model call:
+
+| View | Source | Persistence |
+| --- | --- | --- |
+| Transcript | Original `AgentState.messages`, including tool arguments and outputs | Native committed checkpoint |
+| Model-facing context | Edited copy of `ModelRequest.messages` | Derived for each model call |
+
+`threads.ahistory()`, terminal rendering, and the terminal `values` part use the
+original interactions. Context edits affect model input only. The durable
+transcript includes completed turns; failed and cancelled work remains excluded
+by the existing completed-checkpoint recovery policy.
+
+Every factory-built agent automatically compacts model input using
+`MAX_CONTEXT_TOKENS = 64_000` in `alpha_forge_langchain/defaults.py`. Before each
+model call, it estimates tokens for messages, system instructions, and tool
+definitions, then drops oldest complete turns until the request fits. The current
+user turn and all its tool exchanges remain intact. If those alone exceed the
+budget, the turn fails with a descriptive error before calling the model. Counting
+is approximate, and the budget does not reserve output tokens. New agents read
+the current setting, so it can change between turns.
+
+Additional context editing is available through the agent middleware argument,
+and runs before default compaction. For example, LangChain's native tool-output
+clearing can keep the latest three tool results above a token threshold:
+
+```python
+from langchain.agents.middleware import (
+    ClearToolUsesEdit,
+    ContextEditingMiddleware,
+)
+
+
+agent = await app.agents.acreate(
+    middleware=[
+        ContextEditingMiddleware(
+            edits=[ClearToolUsesEdit(trigger=40_000, keep=3)]
+        )
+    ]
+)
+```
+
+LangChain's middleware deep-copies request messages before applying its edits and
+passes them to the model using `request.override(messages=edited_messages)`.
+Original tool outputs remain available in the transcript, including after
+reopening the application. Rebuilding an agent with a different policy derives a
+new view from those originals; the previous edited view is never saved as history.
+
+Custom asynchronous policies use `awrap_model_call` or an async
+`@wrap_model_call` function. Deep-copy `request.messages`, apply policies to that
+copy, and await the handler with the overridden request. Preserve tool-call IDs
+and matching tool results when trimming or filtering. Inspect the actual model
+input through native model-call callbacks; checkpoint inspection returns the
+transcript rather than a particular request's context.
+
+Context-only policies must not return updates to `state["messages"]`, mutate its
+nested message objects, or add synthetic context messages to transcript/UI
+events. Built-in `SummarizationMiddleware` and state-mutating trimming examples
+replace persisted messages, so they cannot be used unchanged for this purpose.
+Future summarization can inject request-only summary messages and cache policy
+metadata in other agent-state fields while preserving the original transcript.
+Auxiliary policy model responses must also stay outside transcript/UI events.
+
+This separation needs no additional history table, duplicated state blob, or
+query-engine API. It reduces model input size; full transcript/checkpoint storage
+continues to grow.
+
+References: [LangChain context engineering](https://docs.langchain.com/oss/python/langchain/context-engineering),
+[native context editing](https://docs.langchain.com/oss/python/langchain/middleware/built-in#context-editing).
+
 ## Built-in tools
 
 File, search, and shell tools use Deep Agents' `FilesystemMiddleware` and
@@ -291,7 +362,7 @@ upgraded automatically at startup. Thread IDs, committed checkpoint pointers,
 unfinished markers, and native checkpoints are preserved. Older `conversations`
 records from before the thread-based API are not imported.
 
-Approvals, sandbox execution, context compaction, automatic checkpoint pruning,
+Approvals, sandbox execution, automatic checkpoint pruning,
 old transcript import, and advanced slash commands are outside this version.
 
 ## Tests

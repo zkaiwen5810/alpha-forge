@@ -118,7 +118,7 @@ class Persistence:
             return await self._threads.aget(thread_id)
 
     async def read_history(self, thread_id: str) -> list[BaseMessage]:
-        """Read only messages from the committed native checkpoint."""
+        """Read the original transcript from the committed native checkpoint."""
         async with self.failure_boundary():
             assert self._threads is not None
             info = await self._threads.aget(thread_id)

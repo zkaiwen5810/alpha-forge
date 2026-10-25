@@ -80,6 +80,7 @@ class QueryEngine:
 
         This does not invoke the model or wait for an active turn. The agent's
         schema selects state channels without exposing checkpoint routing data.
+        Messages are the transcript; request-only context edits are not stored.
         """
         async with self._persistence.failure_boundary():
             self._validate_invocation(thread_id, agent)

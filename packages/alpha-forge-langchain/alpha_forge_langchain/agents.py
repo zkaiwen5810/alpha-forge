@@ -26,6 +26,7 @@ from pydantic import SecretStr
 
 from . import defaults
 from .middleware import (
+    HistoryCompactionMiddleware,
     HostPathMiddleware,
     ThreadPromptMiddleware,
     filesystem_middleware,
@@ -156,6 +157,15 @@ class AgentFactory:
     ) -> CompiledStateGraph[
         AgentState[ResponseT], ContextT, InputAgentState, OutputAgentState[ResponseT]
     ]:
+        """Build this turn's agent, optionally deriving its model context.
+
+        Context policies belong in model-call middleware: edit a deep copy of
+        request.messages and pass request.override(messages=edited) to the
+        handler. Keep state.messages as the original transcript. Middleware
+        returning message state updates changes that transcript permanently.
+        Old complete turns are automatically removed from model input when it
+        exceeds defaults.MAX_CONTEXT_TOKENS, after caller-provided policies run.
+        """
         self._persistence.check_open()
         if self._stack is None:
             raise RuntimeError("agent factory is closed")
@@ -173,6 +183,7 @@ class AgentFactory:
                     run_limit=defaults.MAX_MODEL_CALLS, exit_behavior="error"
                 ),
                 *middleware,
+                HistoryCompactionMiddleware(defaults.MAX_CONTEXT_TOKENS),
             ],
         )
         return create_agent(

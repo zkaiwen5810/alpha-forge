@@ -1,61 +1,15 @@
-"""Custom middleware and filesystem middleware configuration."""
+"""Configure host filesystem tools and normalize their paths."""
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import NotRequired, override
+from typing import override
 
 from deepagents.backends import LocalShellBackend
 from deepagents.middleware.filesystem import FilesystemMiddleware
-from langchain.agents import AgentState
-from langchain.agents.middleware import AgentMiddleware, wrap_tool_call
-from langchain.agents.middleware.model_call_limit import ModelCallLimitState
-from langchain.agents.middleware.types import (
-    ModelRequest,
-    ModelResponse,
-    ToolCallRequest,
-)
-from langchain_core.messages import AIMessage, SystemMessage, ToolCall, ToolMessage
+from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ToolCallRequest
+from langchain_core.messages import AIMessage, ToolCall, ToolMessage
 from langgraph.types import Command
-
-
-class ThreadPromptState(AgentState):
-    system_prompt_override: NotRequired[str | None]
-
-
-class ThreadPromptMiddleware(AgentMiddleware):
-    """Apply an optional persisted thread prompt to each native model request."""
-
-    state_schema = ThreadPromptState
-
-    @override
-    async def awrap_model_call(
-        self,
-        request: ModelRequest,
-        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
-    ) -> ModelResponse:
-        prompt = request.state.get("system_prompt_override")
-        if prompt is not None:
-            if not isinstance(prompt, str):
-                raise ValueError("system_prompt_override must be a string or None")
-            request = request.override(system_message=SystemMessage(content=prompt))
-        return await handler(request)
-
-
-@wrap_tool_call(state_schema=ModelCallLimitState)
-async def tool_errors(
-    request: ToolCallRequest,
-    handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[object]]],
-) -> ToolMessage | Command[object]:
-    try:
-        return await handler(request)
-    # Normalize arbitrary exceptions from caller-supplied tools for the model.
-    except Exception as exc:  # noqa: BLE001
-        return ToolMessage(
-            content=f"error: {str(exc) or type(exc).__name__}",
-            tool_call_id=request.tool_call["id"],
-            name=request.tool_call["name"],
-            status="error",
-        )
 
 
 class HostPathMiddleware(AgentMiddleware):

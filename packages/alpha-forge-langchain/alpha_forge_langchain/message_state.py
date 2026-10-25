@@ -14,7 +14,10 @@ from langgraph.types import StreamPart
 
 
 class MessageState:
-    """Reconcile message chunks and completed node updates by message ID."""
+    """Project transcript events, reconciling chunks and updates by message ID.
+
+    Feed native response/tool stream parts here, not edited model-input views.
+    """
 
     def __init__(self, messages: Sequence[BaseMessage] = ()) -> None:
         self.messages: list[BaseMessage] = deepcopy(list(messages))

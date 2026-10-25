@@ -7,6 +7,7 @@ MODEL = "DeepSeek-V4-Flash"
 BASE_URL = "http://litellm:4000/v1"
 TIMEOUT = 30.0
 MAX_MODEL_CALLS = 10
+MAX_CONTEXT_TOKENS = 64_000
 SYSTEM_PROMPT = "You are Alpha Forge, a concise and helpful assistant."
 
 
