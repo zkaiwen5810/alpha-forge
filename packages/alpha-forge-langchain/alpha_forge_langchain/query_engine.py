@@ -14,6 +14,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import StreamPart
 from langgraph.typing import ContextT, InputT, OutputT, StateT
 
+from .errors import PersistenceError
 from .persistence import Persistence
 
 
@@ -50,9 +51,44 @@ class QueryEngine:
             if entry.users == 0:
                 del self._locks[thread_id]
 
-    async def aget_state(self, thread_id: str) -> dict[str, object]:
-        """Read committed state without waiting for an active turn."""
-        return await self._persistence.read_state(thread_id)
+    def _validate_invocation(
+        self,
+        thread_id: str,
+        agent: CompiledStateGraph[StateT, ContextT, InputT, OutputT],
+        config: RunnableConfig | None = None,
+    ) -> None:
+        if not self._persistence.owns_checkpointer(agent.checkpointer):
+            raise ValueError("agent must use this application's persistence backend")
+        for supplied in (agent.config, config):
+            configurable = (supplied or {}).get("configurable", {})
+            if configurable.get("thread_id", thread_id) != thread_id:
+                raise ValueError("config thread_id conflicts with submission")
+            if any(
+                key in {"checkpoint_id", "checkpoint_ns", "checkpoint_map"}
+                or key.startswith("__pregel_")
+                for key in configurable
+            ):
+                raise ValueError("checkpoint configuration is managed by the engine")
+
+    async def aget_state(
+        self,
+        thread_id: str,
+        *,
+        agent: CompiledStateGraph[StateT, ContextT, InputT, OutputT],
+    ) -> StateT:
+        """Project committed checkpoint state through the supplied native agent.
+
+        This does not invoke the model or wait for an active turn. The agent's
+        schema selects state channels without exposing checkpoint routing data.
+        """
+        async with self._persistence.failure_boundary():
+            self._validate_invocation(thread_id, agent)
+            assert self._persistence._threads is not None
+            info = await self._persistence._threads.aget(thread_id)
+            snapshot = await agent.aget_state(info.checkpoint_config())
+            if snapshot.created_at is None:
+                raise PersistenceError("completed thread checkpoint is missing")
+            return deepcopy(cast(StateT, snapshot.values))
 
     async def asubmit(
         self,
@@ -69,22 +105,7 @@ class QueryEngine:
         not the entire history. Config and context apply to this turn.
         """
         async with self._thread(thread_id):
-            if not self._persistence.owns_checkpointer(agent.checkpointer):
-                raise ValueError(
-                    "agent must use this application's persistence backend"
-                )
-            for supplied in (agent.config, config):
-                configurable = (supplied or {}).get("configurable", {})
-                if configurable.get("thread_id", thread_id) != thread_id:
-                    raise ValueError("config thread_id conflicts with submission")
-                if any(
-                    key in {"checkpoint_id", "checkpoint_ns", "checkpoint_map"}
-                    or key.startswith("__pregel_")
-                    for key in configurable
-                ):
-                    raise ValueError(
-                        "checkpoint configuration is managed by the engine"
-                    )
+            self._validate_invocation(thread_id, agent, config)
             info = await self._persistence.begin(thread_id)
             invocation: RunnableConfig = {**(config or {})}
             invocation["configurable"] = {
@@ -117,7 +138,7 @@ class QueryEngine:
             # A short commit task settles durable promotion even if the caller
             # cancels concurrently. It never executes agent work in the background.
             promotion = asyncio.create_task(
-                self._persistence.promote(info, checkpoint_id, values)
+                self._persistence.promote(info, checkpoint_id)
             )
             cancellation: asyncio.CancelledError | None = None
             while not promotion.done():

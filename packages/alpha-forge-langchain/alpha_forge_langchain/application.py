@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from pathlib import Path
 from types import TracebackType
-from typing import Self, cast
+from typing import Self
 from uuid import uuid4
 
 from langchain_core.language_models import BaseChatModel
@@ -35,12 +35,11 @@ class ThreadRepository:
         async with self._persistence.failure_boundary():
             assert self._persistence._threads is not None
             info = await self._persistence._threads.aget(thread_id)
-            await self._persistence.validate_head(info)
+            await self._persistence.read_checkpoint(info)
             return info
 
     async def ahistory(self, thread_id: str) -> list[BaseMessage]:
-        state = await self._persistence.read_state(thread_id)
-        return cast(list[BaseMessage], state.get("messages", []))
+        return await self._persistence.read_history(thread_id)
 
 
 class AgentApplication:

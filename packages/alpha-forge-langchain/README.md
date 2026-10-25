@@ -103,6 +103,7 @@ async def main():
                             print(thread_id, chunk.text, flush=True)
                     elif part["type"] == "values":
                         print(thread_id, "Saved:", part["data"]["messages"][-1].text)
+            return agent
 
         # The caller owns tasks. Exit them before closing application resources.
         async with asyncio.TaskGroup() as tasks:
@@ -110,8 +111,8 @@ async def main():
             tasks.create_task(run_turn(second, "Explain multiplication.", "Be a tutor."))
 
         # Next turn can change the prompt, tools, middleware, or model.
-        await run_turn(first, "Explain your answer.", "Explain step by step.")
-        print(await app.query.aget_state(first))
+        agent = await run_turn(first, "Explain your answer.", "Explain step by step.")
+        print(await app.query.aget_state(first, agent=agent))
 
     # Inspection does not require a model or credentials.
     async with AgentApplication("./threads.sqlite3") as app:
@@ -136,10 +137,13 @@ LangGraph restores prior messages and compatible agent state from the committed
 checkpoint. `thread_id` is the same stable identifier used by LangGraph.
 
 Different threads progress concurrently. Same-thread submissions serialize from
-checkpoint selection through promotion. `aget_state()` and history inspection
-return the committed snapshot even while that thread is responding. Stream and
-state results are independent copies. QueryEngine owns no input queues, worker
-tasks, event broker, or public checkpointer.
+checkpoint selection through promotion. `aget_state(thread_id, agent=agent)`
+uses the agent's native state inspection API at the committed checkpoint, so its
+schema projects state without internal routing channels. It does not invoke the
+model. `threads.ahistory(thread_id)` reads messages directly from that checkpoint
+and needs no agent or credentials. Both return committed data while a turn is
+responding. Stream and state results are independent copies. QueryEngine owns no
+input queues, worker tasks, event broker, or public checkpointer.
 
 The generator emits **one terminal `values` part after successful checkpoint
 promotion**, with full public graph state and empty `interrupts`. Message/update
@@ -273,14 +277,19 @@ calls; it does not undo tool effects or guarantee exactly-once execution.
 
 One application owns each database, enforced with an advisory process lock.
 Queries serialize only within the same thread. Metadata transactions use a
-separate SQLite connection from native checkpoints, and committed public state
-and its head advance atomically. A SQLite failure halts further operations until
+separate SQLite connection from native checkpoints. The thread table stores
+only the thread ID, committed checkpoint pointer, and unfinished marker; graph
+state is stored exclusively by LangGraph. Promotion atomically advances the
+pointer and clears the marker. A SQLite failure halts further operations until
 closing and reopening. Finish caller-owned tasks and streams before leaving the
 application context to release database connections, owned clients, and the
 process lock.
 
-This private API and thread metadata schema replace `AgentRuntime`. Use a fresh
-database for this version; legacy conversation records are not migrated.
+This private API and thread metadata schema replace `AgentRuntime`. Databases
+with the previous `threads.state_type` and `threads.state` payload columns are
+upgraded automatically at startup. Thread IDs, committed checkpoint pointers,
+unfinished markers, and native checkpoints are preserved. Older `conversations`
+records from before the thread-based API are not imported.
 
 Approvals, sandbox execution, context compaction, automatic checkpoint pruning,
 old transcript import, and advanced slash commands are outside this version.

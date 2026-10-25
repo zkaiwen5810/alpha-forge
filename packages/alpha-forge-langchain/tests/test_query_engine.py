@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import NotRequired, cast
 from unittest.mock import patch
 
-from alpha_forge_langchain import AgentApplication
+from alpha_forge_langchain import AgentApplication, PersistenceError
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import before_model, wrap_model_call
 from langchain.agents.middleware.types import InputAgentState
@@ -116,7 +116,9 @@ class QueryEngineTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(
                 asyncio.gather(first.entered.wait(), second.entered.wait()), 5
             )
-            self.assertEqual(await self.engine.aget_state("A"), {"messages": []})
+            self.assertEqual(
+                await self.engine.aget_state("A", agent=agents[0]), {"messages": []}
+            )
             second.release.set()
             result = await asyncio.wait_for(tasks[1], 5)
             self.assertFalse(tasks[0].done())
@@ -128,7 +130,9 @@ class QueryEngineTests(unittest.IsolatedAsyncioTestCase):
                     m.text
                     for m in cast(
                         list[BaseMessage],
-                        (await self.engine.aget_state("A"))["messages"],
+                        (await self.engine.aget_state("A", agent=agents[0]))[
+                            "messages"
+                        ],
                     )
                 ],
                 ["A", "A"],
@@ -259,13 +263,13 @@ class QueryEngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [m.text for m in second_model.seen[0][1:-1]], ["first-user", "", "AB", "AB"]
         )
-        snapshot = await self.engine.aget_state("changing")
+        snapshot = await self.engine.aget_state("changing", agent=agent)
         cast(list[BaseMessage], snapshot["messages"]).clear()
         self.assertEqual(
             len(
                 cast(
                     list[BaseMessage],
-                    (await self.engine.aget_state("changing"))["messages"],
+                    (await self.engine.aget_state("changing", agent=agent))["messages"],
                 )
             ),
             8,
@@ -291,8 +295,11 @@ class QueryEngineTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(model.seen[0][0].text.startswith(expected))
             self.assertIn("host workspace", model.seen[0][0].text)
+        inspector = await self.agent()
         self.assertIsNone(
-            (await self.engine.aget_state("one"))["system_prompt_override"]
+            (await self.engine.aget_state("one", agent=inspector)).get(
+                "system_prompt_override"
+            )
         )
 
     async def test_direct_tool_and_structured_output_are_valid_completions(self):
@@ -345,7 +352,8 @@ class QueryEngineTests(unittest.IsolatedAsyncioTestCase):
                 await wait_until(lambda: self.engine._locks["commit"].users == 2)
                 self.assertFalse(first.done())
                 self.assertEqual(
-                    await self.engine.aget_state("commit"), {"messages": []}
+                    await self.engine.aget_state("commit", agent=first_agent),
+                    {"messages": []},
                 )
                 first.cancel()  # A repeated cancellation must not detach the commit.
                 release.set()
@@ -429,3 +437,86 @@ class QueryEngineTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 release.set()
                 await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def test_state_inspection_uses_committed_checkpoint_after_failure(self):
+        model = ScriptedModel(
+            responses=[AIMessage(content="baseline"), RuntimeError("failed turn")]
+        )
+        agent = await self.app.agents.acreate(model=model)
+        await consume(self.engine, "committed", agent, "first")
+        with self.assertRaisesRegex(RuntimeError, "failed turn"):
+            await consume(self.engine, "committed", agent, "unfinished")
+        latest = await agent.aget_state({"configurable": {"thread_id": "committed"}})
+        self.assertEqual(latest.values["messages"][-1].text, "unfinished")
+        state = await self.engine.aget_state("committed", agent=agent)
+        self.assertEqual([m.text for m in state["messages"]], ["first", "baseline"])
+        self.assertFalse(any(key.startswith(("branch:", "__")) for key in state))
+        self.assertTrue(
+            (await self.app.threads.aget("committed")).unfinished_work_excluded
+        )
+        self.assertEqual(
+            [m.text for m in await self.app.threads.ahistory("committed")],
+            ["first", "baseline"],
+        )
+
+    async def test_state_inspection_reports_missing_committed_checkpoint(self):
+        agent = await self.agent()
+        await consume(self.engine, "missing", agent, "hello")
+        with (
+            patch.object(
+                self.app._persistence._checkpointer, "aget_tuple", return_value=None
+            ),
+            self.assertRaisesRegex(PersistenceError, "checkpoint is missing"),
+        ):
+            await self.engine.aget_state("missing", agent=agent)
+
+    async def test_native_state_survives_reopen_without_metadata_payload(self):
+        @before_model(state_schema=CountingState)
+        async def count(state, runtime):
+            return {"visits": state.get("visits", 0) + 1}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "native.sqlite3"
+            async with AgentApplication(database) as writer:
+                agent = await writer.agents.acreate(
+                    model=ScriptedModel(responses=[AIMessage(content="first answer")]),
+                    middleware=[count],
+                )
+                await consume(
+                    writer.query,
+                    "persisted",
+                    agent,
+                    "first",
+                    system_prompt_override="Saved instructions",
+                )
+                assert writer._persistence._threads is not None
+                async with writer._persistence._threads.connection.execute(
+                    "PRAGMA table_info(threads)"
+                ) as cursor:
+                    columns = [row[1] for row in await cursor.fetchall()]
+                self.assertEqual(columns, ["thread_id", "checkpoint_id", "unfinished"])
+
+            with patch.dict(os.environ, {}, clear=True):
+                async with AgentApplication(database) as reader:
+                    history = await reader.threads.ahistory("persisted")
+                    self.assertEqual(
+                        [m.text for m in history], ["first", "first answer"]
+                    )
+                    model = ScriptedModel(
+                        responses=[AIMessage(content="second answer")]
+                    )
+                    agent = await reader.agents.acreate(
+                        model=model, middleware=[count], system_prompt="Changed default"
+                    )
+                    snapshot = await reader.query.aget_state("persisted", agent=agent)
+                    self.assertEqual(snapshot.get("visits"), 1)
+                    self.assertEqual(
+                        snapshot.get("system_prompt_override"), "Saved instructions"
+                    )
+                    self.assertEqual(model.seen, [])
+                    resumed = await consume(reader.query, "persisted", agent, "second")
+                    self.assertEqual(resumed["visits"], 2)
+                    self.assertEqual(len(resumed["messages"]), 4)
+                    self.assertTrue(
+                        model.seen[0][0].text.startswith("Saved instructions")
+                    )

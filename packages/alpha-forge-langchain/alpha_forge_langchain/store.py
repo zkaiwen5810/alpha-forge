@@ -35,43 +35,47 @@ class ThreadStore:
             CREATE TABLE IF NOT EXISTS threads (
                 thread_id TEXT PRIMARY KEY,
                 checkpoint_id TEXT NOT NULL,
-                state_type TEXT NOT NULL,
-                state BLOB NOT NULL,
                 unfinished INTEGER NOT NULL DEFAULT 0
             )
         """)
         await self.connection.commit()
+        async with self.connection.execute("PRAGMA table_info(threads)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        obsolete = [name for name in ("state_type", "state") if name in columns]
+        if obsolete:
+            # CREATE TABLE IF NOT EXISTS does not update an existing schema.
+            # Remove only the duplicate payload; native checkpoints own state.
+            await self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                for column in obsolete:
+                    await self.connection.execute(
+                        f"ALTER TABLE threads DROP COLUMN {column}"
+                    )
+                await self.connection.commit()
+            except BaseException:
+                await self.connection.rollback()
+                raise
 
-    async def acreate(
-        self, thread_id: str, checkpoint_id: str, state: tuple[str, bytes]
-    ) -> None:
+    async def acreate(self, thread_id: str, checkpoint_id: str) -> None:
         async with self._lock:
             await self.connection.execute(
-                "INSERT INTO threads (thread_id, checkpoint_id, state_type, state) "
-                "VALUES (?, ?, ?, ?)",
-                (thread_id, checkpoint_id, *state),
+                "INSERT INTO threads (thread_id, checkpoint_id) VALUES (?, ?)",
+                (thread_id, checkpoint_id),
             )
             await self.connection.commit()
 
     async def aget(self, thread_id: str) -> ThreadInfo:
-        info, _ = await self.aget_snapshot(thread_id)
-        return info
-
-    async def aget_snapshot(
-        self, thread_id: str
-    ) -> tuple[ThreadInfo, tuple[str, bytes]]:
         async with (
             self._lock,
             self.connection.execute(
-                "SELECT checkpoint_id, unfinished, state_type, state "
-                "FROM threads WHERE thread_id = ?",
+                "SELECT checkpoint_id, unfinished FROM threads WHERE thread_id = ?",
                 (thread_id,),
             ) as cursor,
         ):
             row = await cursor.fetchone()
         if row is None:
             raise ThreadNotFoundError(f"unknown thread: {thread_id}")
-        return ThreadInfo(thread_id, row[0], bool(row[1])), (row[2], row[3])
+        return ThreadInfo(thread_id, row[0], bool(row[1]))
 
     async def abegin(self, info: ThreadInfo) -> None:
         async with self._lock:
@@ -84,14 +88,12 @@ class ThreadStore:
                     raise PersistenceError("thread head changed before starting turn")
             await self.connection.commit()
 
-    async def apromote(
-        self, info: ThreadInfo, checkpoint_id: str, state: tuple[str, bytes]
-    ) -> None:
+    async def apromote(self, info: ThreadInfo, checkpoint_id: str) -> None:
         async with self._lock:
             async with self.connection.execute(
-                "UPDATE threads SET checkpoint_id = ?, state_type = ?, state = ?, "
-                "unfinished = 0 WHERE thread_id = ? AND checkpoint_id = ?",
-                (checkpoint_id, *state, info.thread_id, info.checkpoint_id),
+                "UPDATE threads SET checkpoint_id = ?, unfinished = 0 "
+                "WHERE thread_id = ? AND checkpoint_id = ?",
+                (checkpoint_id, info.thread_id, info.checkpoint_id),
             ) as cursor:
                 if cursor.rowcount != 1:
                     raise PersistenceError("thread head changed before promotion")

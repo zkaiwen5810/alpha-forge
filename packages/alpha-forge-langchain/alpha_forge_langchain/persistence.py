@@ -12,7 +12,8 @@ from types import TracebackType
 from typing import Self, cast
 
 import aiosqlite
-from langgraph.checkpoint.base import empty_checkpoint
+from langchain_core.messages import BaseMessage
+from langgraph.checkpoint.base import CheckpointTuple, empty_checkpoint
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from . import defaults
@@ -113,26 +114,17 @@ class Persistence:
                 {},
             )
             checkpoint_id = cast(str, config.get("configurable", {})["checkpoint_id"])
-            await self._threads.acreate(
-                thread_id,
-                checkpoint_id,
-                self._checkpointer.serde.dumps_typed({"messages": []}),
-            )
+            await self._threads.acreate(thread_id, checkpoint_id)
             return await self._threads.aget(thread_id)
 
-    async def read_state(self, thread_id: str) -> dict[str, object]:
+    async def read_history(self, thread_id: str) -> list[BaseMessage]:
+        """Read only messages from the committed native checkpoint."""
         async with self.failure_boundary():
             assert self._threads is not None
-            assert self._checkpointer is not None
-            info, serialized = await self._threads.aget_snapshot(thread_id)
-            await self.validate_head(info)
-            # Public values exclude checkpoint routing channels. Persist them in
-            # the same metadata transaction that advances the committed head.
-            return deepcopy(
-                cast(
-                    dict[str, object], self._checkpointer.serde.loads_typed(serialized)
-                )
-            )
+            info = await self._threads.aget(thread_id)
+            saved = await self.read_checkpoint(info)
+            messages = saved.checkpoint["channel_values"].get("messages", [])
+            return deepcopy(cast(list[BaseMessage], messages))
 
     def owns_checkpointer(self, checkpointer: object) -> bool:
         return checkpointer is self._checkpointer
@@ -140,21 +132,19 @@ class Persistence:
     async def begin(self, thread_id: str) -> ThreadInfo:
         """Select and mark a head while the engine owns the thread lock."""
         info = await self.ensure_thread(thread_id)
-        await self.validate_head(info)
+        await self.read_checkpoint(info)
         assert self._threads is not None
         await self._threads.abegin(info)
         return info
 
-    async def validate_head(self, info: ThreadInfo) -> None:
+    async def read_checkpoint(self, info: ThreadInfo) -> CheckpointTuple:
         assert self._checkpointer is not None
-        if await self._checkpointer.aget_tuple(info.checkpoint_config()) is None:
+        saved = await self._checkpointer.aget_tuple(info.checkpoint_config())
+        if saved is None:
             raise PersistenceError("completed thread checkpoint is missing")
+        return saved
 
-    async def promote(
-        self, info: ThreadInfo, checkpoint_id: str, values: object
-    ) -> None:
+    async def promote(self, info: ThreadInfo, checkpoint_id: str) -> None:
         async with self.failure_boundary():
             assert self._threads is not None
-            assert self._checkpointer is not None
-            serialized = self._checkpointer.serde.dumps_typed(values)
-            await self._threads.apromote(info, checkpoint_id, serialized)
+            await self._threads.apromote(info, checkpoint_id)
